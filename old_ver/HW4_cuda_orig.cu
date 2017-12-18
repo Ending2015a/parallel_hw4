@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 //#define _DEBUG_
-#define _TIME_MEASURE_
+//#define _TIME_MEASURE_
 
 
 #ifdef _DEBUG_
@@ -68,7 +68,6 @@ inline void init(){
         Dist[i][i] = 0;
     }
 
-
     if(vert < block_size){
         block_size = vert;
     }
@@ -98,21 +97,9 @@ void dump_from_file_and_init(const char *file){
 }
 
 void dump_to_file(const char *file){
-    FILE *outfile = fopen(file, "w");
-	for (int i = 0; i < vert; ++i) {
-		for (int j = 0; j < vert; ++j) {
-			// if (Dist[i][j] >= INF)	fprintf(outfile, "INF ");
-			// else					fprintf(outfile, "%d ", Dist[i][j]);
-            if (Dist[i][j] >= INF)
-                Dist[i][j] = INF;
-		}
-		fwrite(Dist[i], sizeof(int), vert, outfile);
-	}
-    fclose(outfile);
-    /*
     std::ofstream fout(file);
     fout.write((char*)data, sizeof(int)*vert2);
-    fout.close();*/
+    fout.close();
 }
 
 __global__ void init_gpu(int reps){
@@ -168,6 +155,10 @@ __global__ void phase_two(int32_t* const dist, int block_size, int round, int wi
 
     int cell = c * width + r;
 
+    if(c >= vert || r >= vert){  //out of bounds, filled in with INF for each element
+        dist[cell] = INF;
+    }
+
     __syncthreads();
     
     int low = round*block_size;
@@ -197,6 +188,10 @@ __global__ void phase_three(int32_t* const dist, int block_size, int round, int 
     const int r = block_size * bx + tx;
     const int cell = c*width + r;
 
+    if(c >= vert || r >= vert){  //out of bounds, filled in with INF for each element
+        dist[cell] = INF;
+    }
+
     __syncthreads();
 
     int low = round * block_size;
@@ -222,8 +217,8 @@ void block_FW(){
     int Round = CEIL(vert, block_size);
     int padded_size = Round * block_size;
     
-    size_t vert_bytes = vert * sizeof(int);
-    size_t padded_bytes = padded_size * sizeof(int);
+    size_t vert_w_bytes = vert * sizeof(int);
+    size_t padded_w_bytes = padded_size * sizeof(int);
 
     int32_t *device_ptr;
     //size_t pitch;
@@ -231,12 +226,10 @@ void block_FW(){
     dim3 p2b(Round-1, 2, 1);  //phase 2 block
     dim3 p3b(Round-1, Round-1, 1);  //phase 3 block
 
-    dim3 p1t(block_size, block_size, 1);  //phase 1 thread
-    dim3 p2t(block_size, block_size, 1);  //phase 2 thread
-    dim3 p3t(block_size, block_size, 1);  //phase 3 thread
+    dim3 dimt(block_size, block_size, 1);  //thread
 
     //cudaMallocPitch(&device_ptr, &pitch, vert_byte, vert_byte, vert);
-    cudaMalloc(&device_ptr, padded_bytes * padded_size);
+    cudaMalloc(&device_ptr, padded_w_bytes * padded_size);
 
     //size_t pitch_int = pitch / sizeof(int);
     //LOG("pitch => %zu bytes (%zu words)", pitch, pitch_int);
@@ -244,18 +237,21 @@ void block_FW(){
     LOG("the number of blocks: %d", Round);
 
     //dst_ptr, dst_pitch, src, src_pitch, w, h, kind
-    cudaMemcpy2D(device_ptr, padded_bytes, data, vert_bytes, 
-                   vert_bytes, vert, cudaMemcpyHostToDevice);
+    cudaMemcpy2D(device_ptr, padded_w_bytes, data, vert_w_bytes, 
+                   vert_w_bytes, vert, cudaMemcpyHostToDevice);
+
     
     for(int r=0; r < Round; ++r){
         LOG("Round %d/%d", r+1, Round);
-        phase_one<<< 1 , p1t >>>(device_ptr, block_size, r, padded_size, vert);
-        phase_two<<< p2b , p2t >>>(device_ptr, block_size, r, padded_size, vert);
-        phase_three<<< p3b , p3t >>>(device_ptr, block_size, r, padded_size, vert);
+        phase_one<<< 1 , dimt >>>(device_ptr, block_size, r, padded_size, vert);
+        phase_two<<< p2b , dimt >>>(device_ptr, block_size, r, padded_size, vert);
+        phase_three<<< p3b , dimt >>>(device_ptr, block_size, r, padded_size, vert);
     }
 
-    cudaMemcpy2D(data, vert_bytes, device_ptr, padded_bytes, 
-                    vert_bytes, vert, cudaMemcpyDeviceToHost);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy2D(data, vert_w_bytes, device_ptr, padded_w_bytes, 
+                    vert_w_bytes, vert, cudaMemcpyDeviceToHost);
     
     cudaFree(device_ptr);
 
@@ -267,7 +263,7 @@ void block_FW(){
     printf("Total time: %f ms (%f GFLOPS)\n", elapsed_time, 2*vert*vert*vert / (elapsed_time * 1e6));
 #endif
 
-    cudaDeviceSynchronize();
+    
 }
 
 int main(int argc, char **argv){
