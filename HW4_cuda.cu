@@ -16,7 +16,6 @@
 //#define _DEBUG_
 //#define _TIME_MEASURE_
 
-
 #ifdef _DEBUG_
     #include <string>
     #include <sstream>
@@ -108,34 +107,41 @@ __global__ void init_gpu(int reps){
 }
 
 __global__ void phase_one(int32_t* const dist, int block_size, int round, int width, int vert){
+    extern __shared__ int s[];
+    
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
     const int c = block_size * round + ty;
     const int r = block_size * round + tx;
     const int cell = c*width+r;
-    
+    const int s_cell = ty*block_size+tx;
 
-    if(c >= vert || r >= vert){  //out of bounds, filled in with INF for each element
-        dist[cell] = INF;
+    if(c >= vert || r >= vert){
+        s[s_cell] = INF;
+    }else{
+        s[s_cell] = dist[cell];
     }
 
     __syncthreads();
 
-    int low = block_size * round;
-    int up = low + block_size;
-    int n;
-    for( ; low<up ; ++low){
-        // min(dist[c][r], dist[c][low] + dist[low][r])
-        
-        n = dist[ c*width+low ] + dist[ low*width+r ];
-        if(n < dist[cell]){
-            dist[cell] = n;
+    int n, k;
+    for(k=0;k<block_size;++k){
+        // min(dist[ty][tx], dist[ty][i] + dist[i][tx])
+        n = s[ty*block_size+k] + s[k*block_size+tx];
+        if(n < s[s_cell]){
+            s[s_cell] = n;
         }
         __syncthreads();
     }
+
+    dist[cell] = s[s_cell];
 }
 
 __global__ void phase_two(int32_t* const dist, int block_size, int round, int width, int vert){
+    extern __shared__ int s2[];
+    const int *sp = s2;
+    const int *sc = s2 + block_size*block_size;
+
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
     int bx = blockIdx.x;
