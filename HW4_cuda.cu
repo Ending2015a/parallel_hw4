@@ -248,8 +248,6 @@ void block_FW(){
         phase_three<<< p3b , dimt >>>(device_ptr, block_size, r, padded_size, vert);
     }
 
-    cudaDeviceSynchronize();
-
     cudaMemcpy2D(data, vert_w_bytes, device_ptr, padded_w_bytes, 
                     vert_w_bytes, vert, cudaMemcpyDeviceToHost);
     
