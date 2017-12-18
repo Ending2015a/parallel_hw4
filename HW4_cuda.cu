@@ -139,8 +139,8 @@ __global__ void phase_one(int32_t* const dist, int block_size, int round, int wi
 
 __global__ void phase_two(int32_t* const dist, int block_size, int round, int width, int vert){
     extern __shared__ int s2[];
-    const int *s_m = s2;  //main(block)
-    const int *s_c = s2 + block_size*block_size;  //center(pivot)
+    int* const s_m = s2;  //main(block)
+    int* const s_c = s2 + block_size*block_size;  //center(pivot)
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
@@ -182,7 +182,7 @@ __global__ void phase_two(int32_t* const dist, int block_size, int round, int wi
         for(k=0;k<block_size;++k){
             n = s_c[ty*block_size+k] + s_m[k*block_size+tx];
             if(n < s_m[s_cell]){
-                s[s_cell] = n;
+                s_m[s_cell] = n;
             }
             __syncthreads();
         }
@@ -191,7 +191,7 @@ __global__ void phase_two(int32_t* const dist, int block_size, int round, int wi
         for(k=0;k<block_size;++k){
             n = s_m[ty*block_size+k] + s_c[k*block_size+tx];
             if(n < s_m[s_cell]){
-                s[s_cell] = n;
+                s_m[s_cell] = n;
             }
             __syncthreads();
         }
