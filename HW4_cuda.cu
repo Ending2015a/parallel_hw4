@@ -137,34 +137,31 @@ inline void finalize(){
 
 void parse_string(std::stringstream &ss, std::vector<int> &int_list){
 
-    char buf[10000];
+    std::string str = ss.str();
+    const char *buf = str.c_str();
+    size_t sz = str.size();
+
     int lc = 0;
     int item = 0;
-    do{
-        ss.read(buf, sizeof(buf));
-        int k = ss.gcount();
-        for (int i = 0; i < k; ++i){
-            switch (buf[i]){
-                case '\r':
-                    break;
-                case '\n':
-                    int_list.push_back(item);
-                    item = 0; lc++;
-                    break;
-                case ' ':
-                    int_list.push_back(item);
-                    item = 0;
-                    break;
-                case '0': case '1': case '2': case '3':
-                case '4': case '5': case '6': case '7':
-                case '8': case '9':
-                    item = 10*item + buf[i] - '0';
-                    break;
-                default:
-                    std::cerr << "Bad format\n";
-            }    
-        }
-    }while(ss);
+    for (size_t i = 0; i < sz; ++i){
+        switch (buf[i]){
+            case '\n':
+                int_list.push_back(item);
+                item = 0; lc++;
+                break;
+            case ' ':
+                int_list.push_back(item);
+                item = 0;
+                break;
+            case '0': case '1': case '2': case '3':
+            case '4': case '5': case '6': case '7':
+            case '8': case '9':
+                item = 10*item + buf[i] - '0';
+                break;
+            default:
+                break;
+        }    
+    }
 }
 
 void dump_from_file_and_init(const char *file){
@@ -180,7 +177,7 @@ void dump_from_file_and_init(const char *file){
     TIC("parse_int");
 
     std::vector<int> int_list;
-    int_list.reserve(edge * 3+1);
+    int_list.reserve(edge * 3+2);
 
     init();
 
@@ -189,7 +186,7 @@ void dump_from_file_and_init(const char *file){
     TOC("parse_int");
     TIC("init_mat");
 
-    for(auto e = int_list.begin()+1; e != int_list.end(); e+=3){
+    for(auto e = int_list.begin()+2; e != int_list.end(); e+=3){
         Dist[*e][*(e+1)] = *(e+2);
     }
 
