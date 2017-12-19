@@ -201,6 +201,14 @@ __global__ void phase_two(int32_t* const dist, int block_size, int round, int wi
 }
 
 __global__ void phase_three(int32_t* const dist, int block_size, int round, int width, int vert){
+    
+    int bs2 = block_size*block_size;
+
+    extern __shared__ int s3[];
+    int* const s_m = s3;
+    int* const s_l = s3 + bs2;
+    int* const s_r = s_l + bs2;
+
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
     int bx = blockIdx.x;
@@ -209,27 +217,39 @@ __global__ void phase_three(int32_t* const dist, int block_size, int round, int 
     if(bx >= round)++bx;  //shift x
     if(by >= round)++by;  //shift y
 
-    const int c = block_size * by + ty;
-    const int r = block_size * bx + tx;
-    const int cell = c*width + r;
+    const int mc = block_size * by + ty;
+    const int mr = block_size * bx + tx;
+    const int lc = mc;
+    const int lr = block_size * round + tx;
+    const int rc = lr;
+    const int rr = mr;
+    const int m_cell = mc*width + mr;
+    const int l_cell = lc*width + lr;
+    const int r_cell = rc*width + rr;
+    const int s_cell = ty*block_size + tx;
 
-    if(c >= vert || r >= vert){  //out of bounds, filled in with INF for each element
-        dist[cell] = INF;
-    }
+    if(mc >= vert || mr >= vert) s_m[s_cell] = INF;
+    else s_m[s_cell] = dist[m_cell];
+
+    if(lc >= vert || lr >= vert) s_l[s_cell] = INF;
+    else s_l[s_cell] = dist[l_cell];
+
+    if(rc >= vert || rr >= vert) s_r[s_cell] = INF;
+    else s_r[s_cell] = dist[r_cell];
 
     __syncthreads();
 
-    int low = round * block_size;
-    int up = low + block_size;
-    int n;
-    for( ; low<up ; ++low){
-        // min(dist[c][r], dist[c][low] + dist[low][r])
-        n = dist[ c*width+low ] + dist[ low*width+r ];
-        if(n < dist[cell]){
-            dist[cell] = n;
+    int n, k;
+    for(k=0;k<block_size;++k){
+        n = s_l[ty*block_size+k] + s_r[k*block_size+tx];
+        if(n<s_m[s_cell]){
+            s_m[s_cell] = n;
         }
         __syncthreads();
     }
+
+    dist[m_cell] = s_m[s_cell];
+
 }
 
 extern __shared__ int S[];
@@ -265,13 +285,13 @@ void block_FW(){
     cudaMemcpy2D(device_ptr, padded_w_bytes, data, vert_w_bytes, 
                    vert_w_bytes, vert, cudaMemcpyHostToDevice);
 
-    size_t bs2b = block_size * block_size * sizeof(int);
+    size_t bs2b3 = block_size * block_size * sizeof(int) * 3;
     
     for(int r=0; r < Round; ++r){
         LOG("Round %d/%d", r+1, Round);
-        phase_one<<< 1 , dimt , bs2b >>>(device_ptr, block_size, r, padded_size, vert);
-        phase_two<<< p2b , dimt , bs2b*2 >>>(device_ptr, block_size, r, padded_size, vert);
-        phase_three<<< p3b , dimt >>>(device_ptr, block_size, r, padded_size, vert);
+        phase_one<<< 1 , dimt , bs2b3 >>>(device_ptr, block_size, r, padded_size, vert);
+        phase_two<<< p2b , dimt , bs2b3 >>>(device_ptr, block_size, r, padded_size, vert);
+        phase_three<<< p3b , dimt , bs2b3 >>>(device_ptr, block_size, r, padded_size, vert);
     }
 
     cudaMemcpy2D(data, vert_w_bytes, device_ptr, padded_w_bytes, 
