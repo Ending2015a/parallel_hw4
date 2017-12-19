@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <sstream>
 #include <fstream>
+#include <vector>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,8 +11,105 @@
 #include <cuda.h>
 #include <unistd.h>
 
+//#define _DEBUG_
+//#define _TIME_MEASURE_
+
+#ifdef _DEBUG_
+    #include <string>
+    #include <sstream>
+
+    int __print_step = 0;
+    
+    void __pt_log(const char *h_, const char *f_, ...){
+        std::stringstream ss;
+        ss << h_ << f_ << '\n';
+        std::string format = ss.str();
+
+        va_list va;
+        va_start(va, f_);
+            vprintf(format.c_str(), va);
+        va_end(va);
+        __print_step++;
+    }
+
+    #define VA_ARGS(...) , ##__VA_ARGS__
+    #define LOG(f_, ...) __pt_log(\
+                                    "[LOG] Step %3d: ", (f_), \
+                                     __print_step VA_ARGS(__VA_ARGS__))
+#else
+    #define LOG(f_, ...)
+#endif
+
+
+#ifdef _TIME_MEASURE_
+
+    #define PRECISION 1000
+
+    #include <chrono>
+    #include <map>
+
+    using hr_clock = std::chrono::high_resolution_clock;
+
+    struct __timer{
+        bool state;
+        double total;
+        std::chrono::time_point<hr_clock> start;
+        __timer() : state(false), total(0){}
+    };
+
+    std::map<std::string, struct __timer> __t_map;
+    inline void __ms_tic(std::string tag, bool cover=true){
+        try{
+            __timer &t = __t_map[tag];
+            if(!cover && t.state) 
+                throw std::string("the timer has already started");
+            t.state = true;
+            t.start = std::chrono::high_resolution_clock::now();
+        }catch(std::string msg){
+            msg += std::string(": %s");
+            LOG(msg.c_str(), tag.c_str());
+        }
+    }
+
+    inline void __ms_toc(std::string tag, bool restart=false){
+        auto end = std::chrono::high_resolution_clock::now();
+        try{
+            __timer &t = __t_map[tag];
+            if(!t.state)
+                throw std::string("the timer is inactive");
+            t.state = restart;
+            std::chrono::duration<double> d = end-t.start;
+            t.total += d.count() * PRECISION;
+            t.start = end;
+        }catch(std::string msg){
+            msg += std::string(": %s");
+            LOG(msg.c_str(), tag.c_str());
+        }
+    }
+
+    inline void __log_all(){
+        LOG("%-15s %-15s", "Timers", "Elapsed time");
+        for(auto it=__t_map.begin(); it!=__t_map.end(); ++it)
+            LOG("%-15s %.6lf ms", it->first.c_str(), it->second.total);
+    }
+
+    #define TIC(tag, ...) __ms_tic((tag))
+    #define TOC(tag, ...) __ms_toc((tag))
+    #define GET(tag) __t_map[tag].total;
+    #define _LOG_ALL() __log_all()
+#else
+    #define TIC(tag, ...)
+    #define TOC(tag, ...)
+    #define GET(tag) 0
+    #define _LOG_ALL()
+#endif
+
+
+
 #define CEIL(a, b) ((a) + (b) -1)/(b)
 #define INF 1000000000
+#define BLOCK_SIZE block_size
+
 
 int **Dist;
 int *data;
@@ -22,7 +120,7 @@ int vert2;
 inline void init(){
     vert2 = vert*vert;
     Dist = new int*[vert];
-    data = new int[vert2];
+    cudaHostAlloc((void**)&data, vert2*sizeof(int), cudaHostAllocDefault);
 
     std::fill(data, data + vert2, INF);
 
@@ -34,30 +132,76 @@ inline void init(){
 
 inline void finalize(){
     delete[] Dist;
-    delete[] data;
+    cudaFree(data);
+}
+
+void parse_string(std::stringstream &ss, std::vector<int> &int_list){
+
+    char buf[10000];
+    int lc = 0;
+    int item = 0;
+    do{
+        ss.read(buf, sizeof(buf));
+        int k = ss.gcount();
+        for (int i = 0; i < k; ++i){
+            switch (buf[i]){
+                case '\r':
+                    break;
+                case '\n':
+                    int_list.push_back(item);
+                    item = 0; lc++;
+                    break;
+                case ' ':
+                    int_list.push_back(item);
+                    item = 0;
+                    break;
+                case '0': case '1': case '2': case '3':
+                case '4': case '5': case '6': case '7':
+                case '8': case '9':
+                    item = 10*item + buf[i] - '0';
+                    break;
+                default:
+                    std::cerr << "Bad format\n";
+            }    
+        }
+    }while(ss);
 }
 
 void dump_from_file_and_init(const char *file){
+    TIC("read_file");
     std::ifstream fin(file);
     std::stringstream ss;
 
     ss << fin.rdbuf();
     ss >> vert >> edge;
-    
+
+    TOC("read_file");
+
+    TIC("parse_int");
+
+    std::vector<int> int_list;
+    int_list.reserve(edge * 3+1);
+
     init();
 
-    int i, j, w;
-    while(--edge >= 0){
-        ss >> i >> j >> w;
-        Dist[i][j] = w;
+    parse_string(ss, int_list);
+
+    TOC("parse_int");
+    TIC("init_mat");
+
+    for(auto e = int_list.begin()+1; e != int_list.end(); e+=3){
+        Dist[*e][*(e+1)] = *(e+2);
     }
+
     fin.close();
+
+    TOC("init_mat");
 }
 
 void dump_to_file(const char *file){
-    std::ofstream fout(file);
-    fout.write((char*)data, sizeof(int)*vert2);
-    fout.close();
+    FILE *fout = fopen(file, "w");
+    fwrite(data, sizeof(int), vert2, fout);
+    fclose(fout);
 }
 
 __global__ void init_gpu(int reps){
@@ -70,17 +214,14 @@ __global__ void phase_one(int32_t* const dist, int block_size, int round, int wi
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
-    const int br = block_size * round;
+    const int br = BLOCK_SIZE * round;
     const int c = br + ty;
     const int r = br + tx;
 
-    const int ty_block = ty * block_size;
-    int k_block = 0;
+    const int ty_block = ty * BLOCK_SIZE;
 
     const int cell = c * width + r;
     const int s_cell = ty_block + tx;
-
-    __syncthreads();
 
     s[s_cell] = dist[cell];
 
@@ -89,12 +230,12 @@ __global__ void phase_one(int32_t* const dist, int block_size, int round, int wi
 
     __syncthreads();
 
+
     int n, k;
-    for(k=0;k<block_size;++k){
-        n = s[ty_block + k] + s[k_block + tx];
+    for(k=0;k<BLOCK_SIZE;++k){
+        n = s[ty_block + k] + s[k*BLOCK_SIZE + tx];
         if(n < s[s_cell])
             s[s_cell] = n;
-        k_block += block_size;
         __syncthreads();
     }
 
@@ -104,7 +245,7 @@ __global__ void phase_one(int32_t* const dist, int block_size, int round, int wi
 __global__ void phase_two(int32_t* const dist, int block_size, int round, int width, int vert){
     extern __shared__ int s[];
     int *const s_m = s;
-    int *const s_c = s + block_size * block_size;
+    int *const s_c = s + BLOCK_SIZE * BLOCK_SIZE;
 
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
@@ -112,30 +253,27 @@ __global__ void phase_two(int32_t* const dist, int block_size, int round, int wi
     int by = blockIdx.y;
     int mc, mr;
     int cc, cr;
-    const int br = block_size * round;
+    const int br = BLOCK_SIZE * round;
 
     if(bx >= round)++bx;
 
     if(by == 0){
         mc = br + ty;
-        mr = block_size * bx + tx;
+        mr = BLOCK_SIZE * bx + tx;
         cc = mc;
         cr = br + tx;
     }else{
-        mc = block_size * bx + ty;
+        mc = BLOCK_SIZE * bx + ty;
         mr = br + tx;
         cc = br + ty;
         cr = mr;
     }
 
-    const int ty_block = ty * block_size;
-    int k_block = 0;
+    const int ty_block = ty * BLOCK_SIZE;
     
     int m_cell = mc * width + mr;
     int c_cell = cc * width + cr;
     int s_cell = ty_block + tx;
-
-    __syncthreads();
 
     s_m[s_cell] = dist[m_cell];
     s_c[s_cell] = dist[c_cell];
@@ -146,22 +284,21 @@ __global__ void phase_two(int32_t* const dist, int block_size, int round, int wi
         s_c[s_cell] = INF;
 
     __syncthreads();
+    
 
     int n, k;
     if(by == 0){
-        for(k=0;k<block_size;++k){
-            n = s_c[ty_block + k] + s_m[k_block + tx];
+        for(k=0;k<BLOCK_SIZE;++k){
+            n = s_c[ty_block + k] + s_m[k*BLOCK_SIZE + tx];
             if(n < s_m[s_cell])
                 s_m[s_cell] = n;
-            k_block += block_size;
             __syncthreads();
         }
     }else{
-        for(k=0;k<block_size;++k){
-            n = s_m[ty_block + k] + s_c[k_block + tx];
+        for(k=0;k<BLOCK_SIZE;++k){
+            n = s_m[ty_block + k] + s_c[k*BLOCK_SIZE + tx];
             if(n < s_m[s_cell])
                 s_m[s_cell] = n;
-            k_block += block_size;
             __syncthreads();
         }
     }
@@ -171,7 +308,7 @@ __global__ void phase_two(int32_t* const dist, int block_size, int round, int wi
 
 __global__ void phase_three(int32_t* const dist, int block_size, int round, int width, int vert){
 
-    const int bs2 = block_size*block_size;
+    const int bs2 = BLOCK_SIZE*BLOCK_SIZE;
 
     extern __shared__ int s[];
     int *const s_m = s;
@@ -186,12 +323,11 @@ __global__ void phase_three(int32_t* const dist, int block_size, int round, int 
     if(bx >= round)++bx;
     if(by >= round)++by;
 
-    const int br = block_size * round;
-    const int ty_block = ty * block_size;
-    int k_block = 0;
+    const int br = BLOCK_SIZE * round;
+    const int ty_block = ty * BLOCK_SIZE;
 
-    const int mc = block_size * by + ty;
-    const int mr = block_size * bx + tx;
+    const int mc = BLOCK_SIZE * by + ty;
+    const int mr = BLOCK_SIZE * bx + tx;
     const int lc = mc;
     const int lr = br + tx;
     const int rc = br + ty;
@@ -200,8 +336,6 @@ __global__ void phase_three(int32_t* const dist, int block_size, int round, int 
     const int l_cell = lc * width + lr;
     const int r_cell = rc * width + rr;
     const int s_cell = ty_block + tx;
-
-    __syncthreads();
 
     s_m[s_cell] = dist[m_cell];
     s_l[s_cell] = dist[l_cell];
@@ -216,12 +350,13 @@ __global__ void phase_three(int32_t* const dist, int block_size, int round, int 
 
     __syncthreads();
 
+
     int n, k;
-    for(k=0;k<block_size;++k){
-        n = s_l[ty_block + k] + s_r[k_block + tx];
+
+    for(k=0;k<BLOCK_SIZE;++k){
+        n = s_l[ty_block + k] + s_r[k*BLOCK_SIZE + tx];
         if(n < s_m[s_cell])
             s_m[s_cell] = n;
-        k_block += block_size;
         __syncthreads();
     }
 
@@ -274,16 +409,37 @@ void block_FW(){
 
 }
 
-
 int main(int argc, char **argv){
-    dump_from_file_and_init(argv[1]);
-    block_size = std::atoi(argv[3]);
 
+    TIC("init");
+    dump_from_file_and_init(argv[1]);
+
+    TOC("init");
+
+
+    TIC("block");
+
+    block_size = std::atoi(argv[3]);
     block_FW();
 
+    TOC("block");
+
+
+
+    TIC("write_file");
+
     dump_to_file(argv[2]);
+
+    TOC("write_file");
+
+
+    TIC("finalize");
+
     finalize();
 
+    TOC("finalize");
+
+    _LOG_ALL();
     return 0;
 }
 
