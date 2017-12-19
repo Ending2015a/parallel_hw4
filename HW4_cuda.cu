@@ -153,12 +153,8 @@ void parse_string(std::stringstream &ss, std::vector<int> &int_list){
                 int_list.push_back(item);
                 item = 0;
                 break;
-            case '0': case '1': case '2': case '3':
-            case '4': case '5': case '6': case '7':
-            case '8': case '9':
-                item = 10*item + buf[i] - '0';
-                break;
             default:
+                item = 10*item + buf[i] - '0';
                 break;
         }    
     }
@@ -204,6 +200,161 @@ void dump_to_file(const char *file){
 __global__ void init_gpu(int reps){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= reps) return;
+}
+
+
+template<int block_size>
+__global__ void phase_one(int32_t* const dist, int round, int width, int vert){
+    __shared__ int s[block_size][block_size];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    const int br = block_size * round;
+    const int c = br + ty;
+    const int r = br + tx;
+    const int cell = c*width + r;
+
+    s[ty][tx] = dist[cell];
+    if(c >= vert || r >= vert)
+        s[ty][tx] = INF;
+    
+    __syncthreads();
+    int mn = s[ty][tx];
+    int n, k;
+    #pragma unroll
+    for(k=0;k<block_size;++k){
+        n = s[ty][k] + s[k][tx];
+        if(n < mn){
+            s[ty][tx] = n;
+            mn = n;
+        }
+        __syncthreads();
+    }
+
+    dist[cell] = mn;
+}
+
+template<int block_size>
+__global__ void phase_two(int32_t* const dist, int round, int width, int vert){
+    __shared__ int s_m[block_size][block_size];
+    __shared__ int s_c[block_size][block_size];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int mc, mr;
+    int cc, cr;
+    const int br = block_size * round;
+
+    if(bx >= round) ++bx;
+
+    if(by == 0){
+        mc = br + ty;
+        mr = block_size * bx + tx;
+        cc = mc;
+        cr = br + tx;
+    }else{
+        mc = block_size * bx + ty;
+        mr = br + tx;
+        cc = br + ty;
+        cr = mr;
+    }
+
+    int m_cell = mc * width + mr;
+    int c_cell = cc * width + cr;
+
+    s_m[ty][tx] = dist[m_cell];
+    s_c[ty][tx] = dist[c_cell];
+
+    if(mc >= vert || mr >= vert)
+        s_m[ty][tx] = INF;
+    if(cc >= vert || cr >= vert)
+        s_c[ty][tx] = INF;
+
+    __syncthreads();
+
+    int mn = s_m[ty][tx];
+    int n, k;
+
+    if(by == 0){
+        #pragma unroll
+        for(k=0;k<block_size;++k){
+            n = s_c[ty][k] + s_m[k][tx];
+            if(n < mn){
+                s_m[ty][tx] = n;
+                mn = n;
+            }
+            __syncthreads();
+        }
+    }else{
+        #pragma unroll
+        for(k=0;k<block_size;++k){
+            n = s_m[ty][k] + s_c[k][tx];
+            if(n < mn){
+                s_m[ty][tx] = n;
+                mn = n;
+            }
+            __syncthreads();
+        }
+    }
+
+    dist[m_cell] = mn;
+}
+
+template<int block_size>
+__global__ void phase_three(int32_t* const dist, int round, int width, int vert){
+    __shared__ int s_m[block_size][block_size];
+    __shared__ int s_l[block_size][block_size];
+    __shared__ int s_r[block_size][block_size];
+
+    const int tx = threadIdx.x;
+    const int ty = threadIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    if(bx >= round)++bx;
+    if(by >= round)++by;
+
+    const int br = block_size * round;
+
+    const int mc = block_size * by + ty;
+    const int mr = block_size * bx + tx;
+    const int lc = mc;
+    const int lr = br + tx;
+    const int rc = br + ty;
+    const int rr = mr;
+
+    const int m_cell = mc * width + mr;
+    const int l_cell = lc * width + lr;
+    const int r_cell = rc * width + rr;
+    
+    s_m[ty][tx] = dist[m_cell];
+    s_l[ty][tx] = dist[l_cell];
+    s_r[ty][tx] = dist[r_cell];
+
+    if(mc >= vert || mr >= vert)
+        s_m[ty][tx] = INF;
+    if(lc >= vert || lr >= vert)
+        s_l[ty][tx] = INF;
+    if(rc >= vert || rr >= vert)
+        s_r[ty][tx] = INF;
+
+    __syncthreads();
+
+    int mn = s_m[ty][tx];
+    int n, k;
+    #pragma unroll
+    for(k=0;k<block_size;++k){
+        n = s_l[ty][k] + s_r[k][tx];
+        if(n < mn){
+            s_m[ty][tx] = n;
+            mn = n;
+        }
+        __syncthreads();
+    }
+
+    dist[m_cell] = mn;
 }
 
 __global__ void phase_one(int32_t* const dist, int block_size, int round, int width, int vert){
@@ -391,10 +542,26 @@ void block_FW(){
 
     cudaDeviceSynchronize();
 
-    for(int r=0;r<Round;++r){
-        phase_one<<< 1 , dimt , bs2b3 >>>(device_ptr, block_size, r, pitch, vert);
-        phase_two<<< p2b , dimt , bs2b3 >>>(device_ptr, block_size, r, pitch, vert);
-        phase_three<<< p3b , dimt , bs2b3 >>>(device_ptr, block_size, r, pitch, vert);
+    switch(block_size){
+        case 16:
+            for(int r=0;r<Round;++r){
+                phase_one<16><<< 1 , dimt >>>(device_ptr, r, pitch, vert);
+                phase_two<16><<< p2b , dimt >>>(device_ptr, r, pitch, vert);
+                phase_three<16><<< p3b , dimt >>>(device_ptr, r, pitch, vert);
+            }break;
+        case 32:
+            for(int r=0;r<Round;++r){
+                phase_one<32><<< 1 , dimt >>>(device_ptr, r, pitch, vert);
+                phase_two<32><<< p2b , dimt >>>(device_ptr, r, pitch, vert);
+                phase_three<32><<< p3b , dimt >>>(device_ptr, r, pitch, vert);
+            }break;
+        default:
+
+            for(int r=0;r<Round;++r){
+                phase_one<<< 1 , dimt , bs2b3 >>>(device_ptr, block_size, r, pitch, vert);
+                phase_two<<< p2b , dimt , bs2b3 >>>(device_ptr, block_size, r, pitch, vert);
+                phase_three<<< p3b , dimt , bs2b3 >>>(device_ptr, block_size, r, pitch, vert);
+            }break;
     }
 
     cudaDeviceSynchronize();
