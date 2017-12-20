@@ -1,6 +1,6 @@
-NVFLAGS  := -O3 -std=c++11
+NVFLAGS  := -O3 -use_fast_math -std=c++11
 
-CXXFLAGS := -fopenmp
+CXXFLAGS := -O3 -march=native -fopenmp
 
 LDFLAGS  := -lm
 
@@ -9,6 +9,11 @@ MPILIBS  := -I/opt/intel/compilers_and_libraries_2017.3.191/linux/mpi/intel64/in
 EXES     := HW4_cuda HW4_openmp HW4_mpi
 
 alls: $(EXES)
+
+debug: CXXFLAGS += -D_DEBUG_
+debug: CXXFLAGS += -D_TIME_MEASURE_
+debug: $(EXES)
+
 
 clean:
 	rm -f $(EXES)
