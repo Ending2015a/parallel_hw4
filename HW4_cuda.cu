@@ -88,9 +88,9 @@
     }
 
     inline void __log_all(){
-        LOG("%-15s %-15s", "Timers", "Elapsed time");
+        LOG("%-30s %-30s", "Timers", "Elapsed time");
         for(auto it=__t_map.begin(); it!=__t_map.end(); ++it)
-            LOG("%-15s %.6lf ms", it->first.c_str(), it->second.total);
+            LOG("%-30s %.6lf ms", it->first.c_str(), it->second.total);
     }
 
     #define TIC(tag, ...) __ms_tic((tag))
@@ -139,13 +139,12 @@ void parse_string(std::stringstream &ss, std::vector<int> &int_list){
     const char *buf = str.c_str();
     size_t sz = str.size();
 
-    int lc = 0;
     int item = 0;
     for (size_t i = 0; i < sz; ++i){
         switch (buf[i]){
             case '\n':
                 int_list.push_back(item);
-                item = 0; lc++;
+                item = 0;
                 break;
             case ' ':
                 int_list.push_back(item);
@@ -198,28 +197,24 @@ void dump_to_file(const char *file){
 template<int block_size>
 __global__ void phase_one(int32_t* const dist, const int round, const int width, const int vert, const int br){
 
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
-
     __shared__ int s[block_size][block_size];
 
-    const int c = br + ty;
-    const int r = br + tx;
+    const int c = br + threadIdx.y;
+    const int r = br + threadIdx.x;
     const int cell = c * width + r;
 
     const bool mb = (c < vert && r < vert);
-    s[ty][tx] = (mb) ? dist[cell] : INF;
+    s[threadIdx.y][threadIdx.x] = (mb) ? dist[cell] : INF;
 
     if( !mb ) return;
     
     __syncthreads();
-    int mn = s[ty][tx];
-    int n, k;
-    #pragma unroll
-    for(k=0;k<block_size;++k){
-        n = s[ty][k] + s[k][tx];
+    int mn = s[threadIdx.y][threadIdx.x];
+    int n;
+    for(int k=0;k<block_size;++k){
+        n = s[threadIdx.y][k] + s[k][threadIdx.x];
         if(n < mn){
-            s[ty][tx] = n;
+            s[threadIdx.y][threadIdx.x] = n;
             mn = n;
         }
         __syncthreads();
@@ -230,13 +225,8 @@ __global__ void phase_one(int32_t* const dist, const int round, const int width,
 
 template<int block_size>
 __global__ void phase_two(int32_t* const dist, const int round, const int width, const int vert, const int br){
-    
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
-    const int bx = blockIdx.x;
-    const int by = blockIdx.y;
 
-    if(bx == round) return;
+    if(blockIdx.x == round) return;
 
     __shared__ int s_m[block_size][block_size];
     __shared__ int s_c[block_size][block_size];
@@ -244,15 +234,15 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
     int mc, mr;
     int cc, cr;
 
-    if(by == 0){
-        mc = br + ty;
-        mr = block_size * bx + tx;
+    if(blockIdx.y == 0){
+        mc = br + threadIdx.y;
+        mr = block_size * blockIdx.x + threadIdx.x;
         cc = mc;
-        cr = br + tx;
+        cr = br + threadIdx.x;
     }else{
-        mc = block_size * bx + ty;
-        mr = br + tx;
-        cc = br + ty;
+        mc = block_size * blockIdx.x + threadIdx.y;
+        mr = br + threadIdx.x;
+        cc = br + threadIdx.y;
         cr = mr;
     }
 
@@ -262,32 +252,30 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
     const bool mb = (mc < vert && mr < vert);
     const bool cb = (cc < vert && cr < vert);
 
-    s_m[ty][tx] = (mb) ? dist[m_cell] : INF;
-    s_c[ty][tx] = (cb) ? dist[cc * width + cr] : INF;
+    s_m[threadIdx.y][threadIdx.x] = (mb) ? dist[m_cell] : INF;
+    s_c[threadIdx.y][threadIdx.x] = (cb) ? dist[cc * width + cr] : INF;
 
     if( !mb ) return;
 
     __syncthreads();
 
-    int mn = s_m[ty][tx];
-    int n, k;
+    int mn = s_m[threadIdx.y][threadIdx.x];
+    int n;
 
-    if(by == 0){
-        #pragma unroll
-        for(k=0;k<block_size;++k){
-            n = s_c[ty][k] + s_m[k][tx];
+    if(blockIdx.y == 0){
+        for(int k=0;k<block_size;++k){
+            n = s_c[threadIdx.y][k] + s_m[k][threadIdx.x];
             if(n < mn){
-                s_m[ty][tx] = n;
+                s_m[threadIdx.y][threadIdx.x] = n;
                 mn = n;
             }
             __syncthreads();
         }
     }else{
-        #pragma unroll
-        for(k=0;k<block_size;++k){
-            n = s_m[ty][k] + s_c[k][tx];
+        for(int k=0;k<block_size;++k){
+            n = s_m[threadIdx.y][k] + s_c[k][threadIdx.x];
             if(n < mn){
-                s_m[ty][tx] = n;
+                s_m[threadIdx.y][threadIdx.x] = n;
                 mn = n;
             }
             __syncthreads();
@@ -300,37 +288,29 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
 template<int block_size>
 __global__ void phase_three(int32_t* const dist, const int round, const int width, const int vert, const int br){
     
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
-    const int bx = blockIdx.x;
-    const int by = blockIdx.y;
-
-    if(bx == round || by == round) return;
+    if(blockIdx.x == round || blockIdx.y == round) return;
 
     __shared__ int s_l[block_size][block_size];
     __shared__ int s_r[block_size][block_size];
 
-    const int mc = block_size * by + ty;
-    const int mr = block_size * bx + tx;
-    const int lr = br + tx;
-    const int rc = br + ty;
+    const int mc = block_size * blockIdx.y + threadIdx.y;
+    const int mr = block_size * blockIdx.x + threadIdx.x;
+    const int lr = br + threadIdx.x;
+    const int rc = br + threadIdx.y;
 
-    const bool lb = (mc < vert && lr < vert);
-    const bool rb = (rc < vert && mr < vert);
-
-    s_l[ty][tx] = (lb) ? dist[mc * width + lr] : INF;
-    s_r[ty][tx] = (rb) ? dist[rc * width + mr] : INF;
+    s_l[threadIdx.y][threadIdx.x] = (mc < vert && lr < vert) ? dist[mc * width + lr] : INF;
+    s_r[threadIdx.y][threadIdx.x] = (rc < vert && mr < vert) ? dist[rc * width + mr] : INF;
 
     if( !(mc < vert && mr < vert) ) return;
 
-    __syncthreads();
-
     const int m_cell = mc * width + mr;
     int mn = dist[m_cell];
-    int n, k;
-    #pragma unroll
-    for(k=0;k<block_size;++k){
-        n = s_l[ty][k] + s_r[k][tx];
+
+    __syncthreads();
+
+    int n;
+    for(int k=0;k<block_size;++k){
+        n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
         if( n < mn) mn = n;
     }
 
