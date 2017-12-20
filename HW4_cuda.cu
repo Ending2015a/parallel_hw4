@@ -105,9 +105,12 @@
 #endif
 
 
-
+#define MAX(a, b) ((a)>(b)?(a):(b))
+#define MIN(a, b) ((a)<(b)?(a):(b))
 #define CEIL(a, b) ((a) + (b) -1)/(b)
 #define INF 1000000000
+#define MAX_BLOCK_SIZE 32
+
 
 int **Dist;
 int *data;
@@ -209,18 +212,45 @@ __global__ void phase_one(int32_t* const dist, const int round, const int width,
     if( !mb ) return;
     
     __syncthreads();
-    int mn = s[threadIdx.y][threadIdx.x];
+
     int n;
     for(int k=0;k<block_size;++k){
         n = s[threadIdx.y][k] + s[k][threadIdx.x];
-        if(n < mn){
+        if(n < s[threadIdx.y][threadIdx.x]){
             s[threadIdx.y][threadIdx.x] = n;
-            mn = n;
         }
         __syncthreads();
     }
 
-    dist[cell] = mn;
+    dist[cell] = s[threadIdx.y][threadIdx.x];
+}
+
+__global__ void phase_one(int32_t* const dist, const int round, const int width, const int vert, const int br){
+
+    __shared__ int s[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+
+    const int c = br + threadIdx.y;
+    const int r = br + threadIdx.x;
+    const int cell = c * width + r;
+
+    const bool mb = (c < vert && r < vert);
+    s[threadIdx.y][threadIdx.x] = (mb) ? dist[cell] : INF;
+
+    if( !mb ) return;
+    
+    int upper = MIN(vert - br, blockDim.x);
+    __syncthreads();
+
+    int n;
+    for(int k=0;k<upper;++k){
+        n = s[threadIdx.y][k] + s[k][threadIdx.x];
+        if(n < s[threadIdx.y][threadIdx.x]){
+            s[threadIdx.y][threadIdx.x] = n;
+        }
+        __syncthreads();
+    }
+
+    dist[cell] = s[threadIdx.y][threadIdx.x];
 }
 
 template<int block_size>
@@ -247,7 +277,6 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
     }
 
     const int m_cell = mc * width + mr;
-    //const int c_cell = cc * width + cr;
 
     const bool mb = (mc < vert && mr < vert);
     const bool cb = (cc < vert && cr < vert);
@@ -259,31 +288,86 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
 
     __syncthreads();
 
-    int mn = s_m[threadIdx.y][threadIdx.x];
     int n;
-
     if(blockIdx.y == 0){
         for(int k=0;k<block_size;++k){
             n = s_c[threadIdx.y][k] + s_m[k][threadIdx.x];
-            if(n < mn){
+            if(n < s_m[threadIdx.y][threadIdx.x]){
                 s_m[threadIdx.y][threadIdx.x] = n;
-                mn = n;
             }
             __syncthreads();
         }
     }else{
         for(int k=0;k<block_size;++k){
             n = s_m[threadIdx.y][k] + s_c[k][threadIdx.x];
-            if(n < mn){
+            if(n < s_m[threadIdx.y][threadIdx.x]){
                 s_m[threadIdx.y][threadIdx.x] = n;
-                mn = n;
             }
             __syncthreads();
         }
     }
 
-    dist[m_cell] = mn;
+    dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
 }
+
+__global__ void phase_two(int32_t* const dist, const int round, const int width, const int vert, const int br){
+
+    if(blockIdx.x == round) return;
+
+    __shared__ int s_m[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_c[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+
+    int mc, mr;
+    int cc, cr;
+
+    if(blockIdx.y == 0){
+        mc = br + threadIdx.y;
+        mr = blockDim.x * blockIdx.x + threadIdx.x;
+        cc = mc;
+        cr = br + threadIdx.x;
+    }else{
+        mc = blockDim.x * blockIdx.x + threadIdx.y;
+        mr = br + threadIdx.x;
+        cc = br + threadIdx.y;
+        cr = mr;
+    }
+
+    const int m_cell = mc * width + mr;
+
+    const bool mb = (mc < vert && mr < vert);
+    const bool cb = (cc < vert && cr < vert);
+
+    s_m[threadIdx.y][threadIdx.x] = (mb) ? dist[m_cell] : INF;
+    s_c[threadIdx.y][threadIdx.x] = (cb) ? dist[cc * width + cr] : INF;
+
+    if( !mb ) return;
+
+    int upper = MIN(vert-br, blockDim.x);
+    __syncthreads();
+
+    int n;
+    if(blockIdx.y == 0){
+        for(int k=0;k<upper;++k){
+            n = s_c[threadIdx.y][k] + s_m[k][threadIdx.x];
+            if(n < s_m[threadIdx.y][threadIdx.x]){
+                s_m[threadIdx.y][threadIdx.x] = n;
+            }
+            __syncthreads();
+        }
+    }else{
+        for(int k=0;k<upper;++k){
+            n = s_m[threadIdx.y][k] + s_c[k][threadIdx.x];
+            if(n < s_m[threadIdx.y][threadIdx.x]){
+                s_m[threadIdx.y][threadIdx.x] = n;
+            }
+            __syncthreads();
+        }
+    }
+
+    dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
+}
+
+
 
 template<int block_size>
 __global__ void phase_three(int32_t* const dist, const int round, const int width, const int vert, const int br){
@@ -301,7 +385,7 @@ __global__ void phase_three(int32_t* const dist, const int round, const int widt
     s_l[threadIdx.y][threadIdx.x] = (mc < vert && lr < vert) ? dist[mc * width + lr] : INF;
     s_r[threadIdx.y][threadIdx.x] = (rc < vert && mr < vert) ? dist[rc * width + mr] : INF;
 
-    if( !(mc < vert && mr < vert) ) return;
+    if( mc >= vert || mr >= vert ) return;
 
     const int m_cell = mc * width + mr;
     int mn = dist[m_cell];
@@ -311,13 +395,48 @@ __global__ void phase_three(int32_t* const dist, const int round, const int widt
     int n;
     for(int k=0;k<block_size;++k){
         n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
-        if( n < mn) mn = n;
+        if( n < mn ) mn = n;
     }
 
     dist[m_cell] = mn;
 }
 
-template<int BLOCK_SIZE> void block_FW(){
+__global__ void phase_three(int32_t* const dist, const int round, const int width, const int vert, const int br){
+    
+    if(blockIdx.x == round || blockIdx.y == round) return;
+
+    __shared__ int s_l[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_r[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+
+    const int mc = blockDim.x * blockIdx.y + threadIdx.y;
+    const int mr = blockDim.x * blockIdx.x + threadIdx.x;
+    const int lr = br + threadIdx.x;
+    const int rc = br + threadIdx.y;
+
+    s_l[threadIdx.y][threadIdx.x] = (mc < vert && lr < vert) ? dist[mc * width + lr] : INF;
+    s_r[threadIdx.y][threadIdx.x] = (rc < vert && mr < vert) ? dist[rc * width + mr] : INF;
+
+    if( mc >= vert || mr >= vert ) return;
+
+    const int m_cell = mc * width + mr;
+    int mn = dist[m_cell];
+    int upper = MIN(vert - br, blockDim.x);
+
+    __syncthreads();
+
+    int n;
+    for(int k=0;k<upper;++k){
+        n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
+        if( n < mn ) mn = n;
+    }
+
+    dist[m_cell] = mn;
+}
+
+
+
+template<int BLOCK_SIZE> 
+void block_FW(){
     int Round = CEIL(vert, BLOCK_SIZE);
     size_t vert_bytes = vert * sizeof(int);
 
@@ -351,6 +470,41 @@ template<int BLOCK_SIZE> void block_FW(){
     cudaFree(device_ptr);
 }
 
+void block_FW(){
+    int Round = CEIL(vert, block_size);
+    size_t vert_bytes = vert * sizeof(int);
+
+    int32_t *device_ptr;
+    size_t pitch_bytes;
+
+    dim3 p2b(Round, 2, 1);
+    dim3 p3b(Round, Round, 1);
+
+    dim3 dimt(block_size, block_size, 1);
+
+
+    cudaMallocPitch(&device_ptr, &pitch_bytes, vert_bytes, vert);
+
+    cudaMemcpy2DAsync(device_ptr, pitch_bytes, data, vert_bytes,
+                    vert_bytes, vert, cudaMemcpyHostToDevice);
+
+    int pitch = pitch_bytes / sizeof(int);
+    cudaDeviceSynchronize();
+
+    int br = 0;
+    for(int r=0;r<Round;++r){
+        phase_one<<< 1 , dimt >>>(device_ptr, r, pitch, vert, br);
+        phase_two<<< p2b , dimt >>>(device_ptr, r, pitch, vert, br);
+        phase_three<<< p3b , dimt >>>(device_ptr, r, pitch, vert, br);
+        br += block_size;
+    }
+
+    cudaMemcpy2D(data, vert_bytes, device_ptr, pitch_bytes, vert_bytes, vert, cudaMemcpyDeviceToHost);
+
+    cudaFree(device_ptr);
+}
+
+
 int main(int argc, char **argv){
 
     TIC("init");
@@ -374,6 +528,9 @@ int main(int argc, char **argv){
             break;
         case 32:
             block_FW<32>();
+            break;
+        default:
+            block_FW();
             break;
     }
 
