@@ -9,6 +9,7 @@
 #include <stdarg.h>
 
 #include <cuda.h>
+#include <omp.h>
 #include <unistd.h>
 
 //#define _DEBUG_
@@ -136,26 +137,62 @@ inline void finalize(){
     cudaFree(data);
 }
 
-void parse_string(std::stringstream &ss, int *int_list){
+//end_list = pointer to the last element in the int_list
+void parse_string(std::stringstream &ss, int *int_list, int *end_list){
 
     std::string str = ss.str();
     char *buf = (char*)str.c_str();
     size_t sz = str.size();
     char *end = buf+sz;
 
-    int item = 0;
-    for (; buf < end; ++buf){
-        switch (*buf){
-            case '\n':
-            case ' ':
-                *int_list=item;
-                ++int_list;
-                item = 0;
-                break;
-            default:
-                item = 10*item + (*buf - '0');
-                break;
+    char *mid = buf + (sz>>1);
+
+    while( mid < end && *mid != ' ' && *mid != '\n' )
+        ++mid;
+
+    int* mid_list = end_list;
+#pragma omp parallel num_threads(2) private(mid) shared(mid_list)
+    {
+        int num = omp_get_num_threads();
+        if(num){ //num = 1
+            int item = 0;
+            ++mid;
+            for(; mid < end; ++mid){
+                switch(*mid){
+                    case '\n':
+                    case ' ':
+                        *mid_list = item;
+                        --mid_list;
+                        item = 0;
+                    default:
+                        item = 10*item + (*mid - '0');
+                        break;
+                }
+            }
+        }else{
+            int item = 0;
+            for (; buf < mid; ++buf){
+                switch (*buf){
+                    case '\n':
+                    case ' ':
+                        *int_list=item;
+                        ++int_list;
+                        item = 0;
+                        break;
+                    default:
+                        item = 10*item + (*buf - '0');
+                        break;
+                }
+            }
         }
+    }
+//end parallel
+
+    ++mid_list;
+    while(mid_list < end_list){
+        (*mid_list) ^= (*end_list) ^= (*mid_list) ^= (*end_list);
+        ++mid_list;
+        --end_list;
     }
 }
 
@@ -176,20 +213,25 @@ void dump_from_file_and_init(const char *file){
     int sz = edge*3+2;
     
     int *int_list = new int[sz];
-    //int_list.reserve(edge * 3+2);
+
 
     init();
 
-    parse_string(ss, int_list);
+    parse_string(ss, int_list, int_list+sz-1);
 
     TOC("init/parse_int");
     TIC("init/init_mat");
 
+    for(int i=0;i<sz;++i){
+        std::cout << int_list[i] << std::endl;
+    }
+
+/*
     int *end = int_list + sz;
     for(int* e = int_list+2; e < end ; e+=3){
         Dist[*e][*(e+1)] = *(e+2);
     }
-
+*/
     fin.close();
 
     delete[] int_list;
@@ -523,7 +565,7 @@ int main(int argc, char **argv){
 
     TOC("init");
 
-
+/*
     TIC("block");
 
     block_size = std::atoi(argv[3]);
@@ -555,7 +597,7 @@ int main(int argc, char **argv){
 
     TOC("write_file");
 
-
+*/
     TIC("finalize");
 
     finalize();
