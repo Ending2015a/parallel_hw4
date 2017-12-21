@@ -122,7 +122,8 @@ int vert2;
 inline void init(){
     vert2 = vert*vert;
     Dist = new int*[vert];
-    cudaMallocHost(&data, vert2*sizeof(int));
+    data = new int[vert2*sizeof(int)];
+    //cudaMallocHost(&data, vert2*sizeof(int));
 
     std::fill(data, data + vert2, INF);
 
@@ -144,33 +145,32 @@ void parse_string(std::stringstream &ss, int *int_list, int *end_list){
     char *buf = (char*)str.c_str();
     size_t sz = str.size();
     char *end = buf+sz;
-
-    char *mid = buf + (sz>>1);
+    char *mid = buf + (sz/2);
 
     while( mid < end && *mid != ' ' && *mid != '\n' )
         ++mid;
 
+    ++mid;
     int* mid_list = end_list;
-#pragma omp parallel num_threads(2) private(mid) shared(mid_list)
+#pragma omp parallel num_threads(2) shared(int_list, end_list, mid_list, buf, end, str, mid)
     {
-        int num = omp_get_num_threads();
+        int num = omp_get_thread_num();
+        int item = 0;
         if(num){ //num = 1
-            int item = 0;
-            ++mid;
-            for(; mid < end; ++mid){
-                switch(*mid){
+            for(char* m = mid; m < end; ++m){
+                switch(*m){
                     case '\n':
                     case ' ':
                         *mid_list = item;
                         --mid_list;
                         item = 0;
+                        break;
                     default:
-                        item = 10*item + (*mid - '0');
+                        item = 10*item + (*m - '0');
                         break;
                 }
             }
         }else{
-            int item = 0;
             for (; buf < mid; ++buf){
                 switch (*buf){
                     case '\n':
@@ -207,14 +207,8 @@ void dump_from_file_and_init(const char *file){
     TOC("init/read_file");
 
     TIC("init/parse_int");
-
-    //std::vector<int> int_list;
-
     int sz = edge*3+2;
-    
     int *int_list = new int[sz];
-
-
     init();
 
     parse_string(ss, int_list, int_list+sz-1);
@@ -222,16 +216,12 @@ void dump_from_file_and_init(const char *file){
     TOC("init/parse_int");
     TIC("init/init_mat");
 
-    for(int i=0;i<sz;++i){
-        std::cout << int_list[i] << std::endl;
-    }
 
-/*
     int *end = int_list + sz;
     for(int* e = int_list+2; e < end ; e+=3){
         Dist[*e][*(e+1)] = *(e+2);
     }
-*/
+
     fin.close();
 
     delete[] int_list;
@@ -565,7 +555,7 @@ int main(int argc, char **argv){
 
     TOC("init");
 
-/*
+
     TIC("block");
 
     block_size = std::atoi(argv[3]);
@@ -597,7 +587,7 @@ int main(int argc, char **argv){
 
     TOC("write_file");
 
-*/
+
     TIC("finalize");
 
     finalize();
