@@ -216,6 +216,7 @@ __global__ void phase_one(int32_t* const dist, const int round, const int width,
 
     if( !mb ) return;
 
+    int o = s[threadIdx.y][threadIdx.x];
     int n;
     for(int k=0;k<block_size;++k){
 
@@ -227,7 +228,8 @@ __global__ void phase_one(int32_t* const dist, const int round, const int width,
         }
     }
 
-    dist[cell] = s[threadIdx.y][threadIdx.x];
+    if(s[threadIdx.y][threadIdx.x] < o)
+        dist[cell] = s[threadIdx.y][threadIdx.x];
 }
 
 __global__ void phase_one(int32_t* const dist, const int round, const int width, const int vert, const int br){
@@ -245,6 +247,7 @@ __global__ void phase_one(int32_t* const dist, const int round, const int width,
     
     int upper = MIN(vert - br, blockDim.x);
 
+    int o = s[threadIdx.y][threadIdx.x];
     int n;
     for(int k=0;k<upper;++k){
 
@@ -256,7 +259,8 @@ __global__ void phase_one(int32_t* const dist, const int round, const int width,
         }
     }
 
-    dist[cell] = s[threadIdx.y][threadIdx.x];
+    if( s[threadIdx.y][threadIdx.x] < o)
+        dist[cell] = s[threadIdx.y][threadIdx.x];
 }
 
 template<int block_size>
@@ -292,6 +296,7 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
 
     if( !mb ) return;
 
+    int o = s_m[threadIdx.y][threadIdx.x];
     int n;
     if(blockIdx.y == 0){
         for(int k=0;k<block_size;++k){
@@ -314,8 +319,8 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
             }
         }
     }
-
-    dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
+    if(s_m[threadIdx.y][threadIdx.x] < o)
+        dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
 }
 
 __global__ void phase_two(int32_t* const dist, const int round, const int width, const int vert, const int br){
@@ -352,6 +357,7 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
 
     int upper = MIN(vert-br, blockDim.x);
 
+    int o = s_m[threadIdx.y][threadIdx.x];
     int n;
     if(blockIdx.y == 0){
         for(int k=0;k<upper;++k){
@@ -375,7 +381,8 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
         }
     }
 
-    dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
+    if(s_m[threadIdx.y][threadIdx.x] < o)
+        dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
 }
 
 template<int block_size>
@@ -397,16 +404,18 @@ __global__ void phase_three(int32_t* const dist, const int round, const int widt
     if( mc >= vert || mr >= vert ) return;
 
     const int m_cell = mc * width + mr;
-    int n;
     __syncthreads();
 
-    int mn = s_l[threadIdx.y][0] + s_r[0][threadIdx.x];
+    int o = dist[m_cell];
+
+    int n;
+    int mn=s_l[threadIdx.y][0] + s_r[0][threadIdx.x];
     for(int k=1;k<block_size;++k){
         n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
         if(n < mn) mn = n;
     }
 
-    if(mn < dist[m_cell])
+    if(mn < o)
         dist[m_cell] = mn;
 }
 
@@ -429,9 +438,9 @@ __global__ void phase_three(int32_t* const dist, const int round, const int widt
 
     const int m_cell = mc * width + mr;
     int upper = MIN(vert - br, blockDim.x);
-
     __syncthreads();
 
+    int o = dist[m_cell];
     int n;
     int mn = s_l[threadIdx.y][0] + s_r[0][threadIdx.x];
     for(int k=1;k<upper;++k){
@@ -439,7 +448,7 @@ __global__ void phase_three(int32_t* const dist, const int round, const int widt
         if( n < mn ) mn = n;
     }
 
-    if( mn < dist[m_cell])
+    if( mn < o )
         dist[m_cell] = mn;
 }
 
