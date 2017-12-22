@@ -2,4 +2,4 @@
 
 cuda=32
 mpi=32
-openmp=16
+openmp=32
