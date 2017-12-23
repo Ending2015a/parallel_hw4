@@ -385,6 +385,8 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
         dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
 }
 
+
+
 template<int block_size>
 __global__ void phase_three(int32_t* const dist, const int round, const int width, const int vert, const int br){
     
@@ -503,14 +505,15 @@ void block_FW(){
     dim3 dimt(block_size, block_size, 1);
 
 
+
     cudaMallocPitch(&device_ptr, &pitch_bytes, vert_bytes, vert);
 
     cudaMemcpy2DAsync(device_ptr, pitch_bytes, data, vert_bytes,
                     vert_bytes, vert, cudaMemcpyHostToDevice);
 
-    int pitch = pitch_bytes / sizeof(int);
     cudaDeviceSynchronize();
 
+    int pitch = pitch_bytes / sizeof(int);
     int br = 0;
     for(int r=0;r<Round;++r){
         phase_one<<< 1 , dimt >>>(device_ptr, r, pitch, vert, br);
@@ -520,6 +523,8 @@ void block_FW(){
     }
 
     cudaMemcpy2D(data, vert_bytes, device_ptr, pitch_bytes, vert_bytes, vert, cudaMemcpyDeviceToHost);
+
+    cudaDeviceSynchronize();
 
     cudaFree(device_ptr);
 }
