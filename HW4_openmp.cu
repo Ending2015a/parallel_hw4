@@ -249,9 +249,11 @@ void print_out(std::string msg){
     LOG("%s", ss.str().c_str());
 }
 
+
+template<int block_size>
 __global__ void phase_one(int32_t* const dist, const int width, const int pivot, const int bound){
 
-    __shared__ int s[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s[block_size][block_size];
 
     const int c = pivot + threadIdx.y;
     const int r = pivot + threadIdx.x;
@@ -261,12 +263,10 @@ __global__ void phase_one(int32_t* const dist, const int width, const int pivot,
     s[threadIdx.y][threadIdx.x] = (mb) ? dist[cell] : INF;
 
     if( !mb ) return;
-    
-    int upper = MIN(bound - pivot, blockDim.x);
 
     int o = s[threadIdx.y][threadIdx.x];
     int n;
-    for(int k=0;k<upper;++k){
+    for(int k=0;k<block_size;++k){
 
         __syncthreads();
 
@@ -280,13 +280,15 @@ __global__ void phase_one(int32_t* const dist, const int width, const int pivot,
         dist[cell] = s[threadIdx.y][threadIdx.x];
 }
 
+
+template<int block_size>
 __global__ void phase_two(int32_t* const dist, const int width, const int pivot,
                         const int start, const int bound, const int skip){
 
     if(blockIdx.x == skip)return;
 
-    __shared__ int s_m[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
-    __shared__ int s_c[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_m[block_size][block_size];
+    __shared__ int s_c[block_size][block_size];
 
     int mc, mr;
     int cc, cr;
@@ -305,11 +307,11 @@ __global__ void phase_two(int32_t* const dist, const int width, const int pivot,
 
     if(blockIdx.y == 0){  //horizontal
         mc = pivot + threadIdx.y;
-        mr = start + blockDim.x * blockIdx.x + threadIdx.x;
+        mr = start + block_size * blockIdx.x + threadIdx.x;
         cc = mc;
         cr = pivot + threadIdx.x;
     }else{
-        mc = start + blockDim.x * blockIdx.x + threadIdx.y;
+        mc = start + block_size * blockIdx.x + threadIdx.y;
         mr = pivot + threadIdx.x;
         cc = pivot + threadIdx.y;
         cr = mr;
@@ -320,20 +322,18 @@ __global__ void phase_two(int32_t* const dist, const int width, const int pivot,
     s_c[threadIdx.y][threadIdx.x] = (cc < bound && cr < bound) ? dist[cc * width + cr] : INF;
     
     if( mc >= bound || mr >= bound ) return;
-
-    int upper = MIN(bound - pivot, blockDim.x);
     
     int o = s_m[threadIdx.y][threadIdx.x];
     int n;
     if(blockIdx.y == 0){
-        for(int k=0;k<upper;++k){
+        for(int k=0;k<block_size;++k){
             __syncthreads();
             n = s_c[threadIdx.y][k] + s_m[k][threadIdx.x];
             if(n < s_m[threadIdx.y][threadIdx.x])
                 s_m[threadIdx.y][threadIdx.x] = n;
         }
     }else{
-        for(int k=0;k<upper;++k){
+        for(int k=0;k<block_size;++k){
             __syncthreads();
             n = s_m[threadIdx.y][k] + s_c[k][threadIdx.x];
             if(n < s_m[threadIdx.y][threadIdx.x])
@@ -345,32 +345,32 @@ __global__ void phase_two(int32_t* const dist, const int width, const int pivot,
         dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
 }
 
+template<int block_size>
 __global__ void phase_three(int32_t* const dist, const int width, const int pivot, 
                         const int start, const int bound, const int bound_p, const int skip){
 
     if(blockIdx.x == skip || blockIdx.y == skip) return;
 
-    __shared__ int s_l[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
-    __shared__ int s_r[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_l[block_size][block_size];
+    __shared__ int s_r[block_size][block_size];
 
-    const int mc = start + blockDim.x * blockIdx.y + threadIdx.y;
-    const int mr = start + blockDim.x * blockIdx.x + threadIdx.x;
+    const int mc = start + block_size * blockIdx.y + threadIdx.y;
+    const int mr = start + block_size * blockIdx.x + threadIdx.x;
     const int lr = pivot + threadIdx.x;
     const int rc = pivot + threadIdx.y;
 
-    s_l[threadIdx.y][threadIdx.x] = (mc < bound_p && lr < bound) ? dist[mc * width + lr] : INF;
-    s_r[threadIdx.y][threadIdx.x] = (rc < bound && mr < bound_p) ? dist[rc * width + mr] : INF;
+    s_l[threadIdx.y][threadIdx.x] = (mc < bound && lr < bound_p) ? dist[mc * width + lr] : INF;
+    s_r[threadIdx.y][threadIdx.x] = (rc < bound_p && mr < bound) ? dist[rc * width + mr] : INF;
 
     if( mc >= bound || mr >= bound ) return;
 
     const int m_cell = mc * width + mr;
-    int upper = MIN(bound_p - pivot, blockDim.x);
     __syncthreads();
 
     int o = dist[m_cell];
     int n;
     int mn = s_l[threadIdx.y][0] + s_r[0][threadIdx.x];
-    for(int k=1;k<upper;++k){
+    for(int k=1;k<block_size;++k){
         n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
         if( n < mn ) mn = n;
     }
@@ -379,13 +379,14 @@ __global__ void phase_three(int32_t* const dist, const int width, const int pivo
         dist[m_cell] = mn;
 }
 
+template<int block_size>
 __global__ void phase_two_v(int32_t* const dist, const int width, const int pivot,
         const int start, const int bound_y, const int bound_x, const int bound){
     
-    __shared__ int s_m[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
-    __shared__ int s_c[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_m[block_size][block_size];
+    __shared__ int s_c[block_size][block_size];
 
-    const int mc = start + blockDim.x*blockIdx.x + threadIdx.y;
+    const int mc = start + block_size * blockIdx.x + threadIdx.y;
     const int mr = pivot + threadIdx.x;
     const int cc = pivot + threadIdx.y;
     const int cr = mr;
@@ -400,11 +401,10 @@ __global__ void phase_two_v(int32_t* const dist, const int width, const int pivo
 
     if( !mb ) return;
 
-    int upper = MIN(bound-pivot, blockDim.x);
     int o = s_m[threadIdx.y][threadIdx.x];
     int n;
 
-    for(int k=0;k<upper; ++k){
+    for(int k=0;k<block_size; ++k){
         __syncthreads();
         n = s_m[threadIdx.y][k] + s_c[k][threadIdx.x];
         if(n < s_m[threadIdx.y][threadIdx.x]){
@@ -416,14 +416,15 @@ __global__ void phase_two_v(int32_t* const dist, const int width, const int pivo
         dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
 }
 
+template<int block_size>
 __global__ void phase_two_h(int32_t* const dist, const int width, const int pivot,
         const int start, const int bound_y, const int bound_x, const int bound){
 
-    __shared__ int s_m[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
-    __shared__ int s_c[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_m[block_size][block_size];
+    __shared__ int s_c[block_size][block_size];
 
     const int mc = pivot + threadIdx.y;
-    const int mr = start + blockDim.x*blockIdx.x + threadIdx.x;
+    const int mr = start + block_size * blockIdx.x + threadIdx.x;
     const int cc = mc;
     const int cr = pivot + threadIdx.x;
 
@@ -437,10 +438,9 @@ __global__ void phase_two_h(int32_t* const dist, const int width, const int pivo
 
     if ( !mb ) return;
 
-    int upper = MIN(bound-pivot, blockDim.x);
     int o = s_m[threadIdx.y][threadIdx.x];
     int n;
-    for(int k=0;k<upper;++k){
+    for(int k=0;k<block_size;++k){
         __syncthreads();
         n = s_c[threadIdx.y][k] + s_m[k][threadIdx.x];
         if(n < s_m[threadIdx.y][threadIdx.x]){
@@ -452,17 +452,18 @@ __global__ void phase_two_h(int32_t* const dist, const int width, const int pivo
         dist[m_cell] = s_m[threadIdx.y][threadIdx.x];
 }
 
+template<int block_size>
 __global__ void phase_three_h(int32_t* const dist, const int width, const int pivot, 
                         const int start_y, const int start_x, const int bound_y, const int bound_x,
                         const int bound, const int skip){
 
     if(blockIdx.y == skip) return;
 
-    __shared__ int s_l[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
-    __shared__ int s_r[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_l[block_size][block_size];
+    __shared__ int s_r[block_size][block_size];
 
-    const int mc = start_y + blockDim.x * blockIdx.y + threadIdx.y;
-    const int mr = start_x + blockDim.x * blockIdx.x + threadIdx.x;
+    const int mc = start_y + block_size * blockIdx.y + threadIdx.y;
+    const int mr = start_x + block_size * blockIdx.x + threadIdx.x;
     const int lr = pivot + threadIdx.x;
     const int rc = pivot + threadIdx.y;
 
@@ -472,13 +473,12 @@ __global__ void phase_three_h(int32_t* const dist, const int width, const int pi
     if( mc >= bound_y || mr >= bound_x ) return;
 
     const int m_cell = mc * width + mr;
-    int upper = MIN(bound - pivot, blockDim.x);
     __syncthreads();
 
     int o = dist[m_cell];
     int n;
     int mn = s_l[threadIdx.y][0] + s_r[0][threadIdx.x];
-    for(int k=1;k<upper;++k){
+    for(int k=1;k<block_size;++k){
         n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
         if( n < mn ) mn = n;
     }
@@ -487,17 +487,18 @@ __global__ void phase_three_h(int32_t* const dist, const int width, const int pi
         dist[m_cell] = mn;
 }
 
+template<int block_size>
 __global__ void phase_three_v(int32_t* const dist, const int width, const int pivot, 
                         const int start_y, const int start_x, const int bound_y, const int bound_x,
                         const int bound, const int skip){
 
     if(blockIdx.x == skip) return;
 
-    __shared__ int s_l[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
-    __shared__ int s_r[MAX_BLOCK_SIZE][MAX_BLOCK_SIZE];
+    __shared__ int s_l[block_size][block_size];
+    __shared__ int s_r[block_size][block_size];
 
-    const int mc = start_y + blockDim.x * blockIdx.y + threadIdx.y;
-    const int mr = start_x + blockDim.x * blockIdx.x + threadIdx.x;
+    const int mc = start_y + block_size * blockIdx.y + threadIdx.y;
+    const int mr = start_x + block_size * blockIdx.x + threadIdx.x;
     const int lr = pivot + threadIdx.x;
     const int rc = pivot + threadIdx.y;
 
@@ -507,13 +508,12 @@ __global__ void phase_three_v(int32_t* const dist, const int width, const int pi
     if( mc >= bound_y || mr >= bound_x ) return;
 
     const int m_cell = mc * width + mr;
-    int upper = MIN(bound - pivot, blockDim.x);
     __syncthreads();
 
     int o = dist[m_cell];
     int n;
     int mn = s_l[threadIdx.y][0] + s_r[0][threadIdx.x];
-    for(int k=1;k<upper;++k){
+    for(int k=1;k<block_size;++k){
         n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
         if( n < mn ) mn = n;
     }
@@ -561,6 +561,7 @@ void block_FW(){
     cudaFree(device_ptr);
 }*/
 
+template<int BLOCK_SIZE>
 void block_FW(){
     int sp[2];
     sp[0] = CEIL(vert, 2);  //lower
@@ -568,7 +569,7 @@ void block_FW(){
 
     size_t vert_bytes = vert * sizeof(int);
 
-    dim3 dimt(block_size, block_size, 1);
+    dim3 dimt(BLOCK_SIZE, BLOCK_SIZE, 1);
 
     int32_t *device_ptr[2];
     size_t pitch_bytes[2];
@@ -613,8 +614,8 @@ void block_FW(){
         // *   ->G11  |  Round_0  |   [0, 
         // *
 
-        int Round_0 = CEIL(sp[0], block_size);
-        int Round_1 = CEIL(sp[1], block_size);
+        int Round_0 = CEIL(sp[0], BLOCK_SIZE);
+        int Round_1 = CEIL(sp[1], BLOCK_SIZE);
 
         int Round = (num==0) ? Round_0:Round_1;
 
@@ -647,22 +648,22 @@ void block_FW(){
         //  |   |     |    |   |     |
         //  |   |     |    |   |  U  |
         //  +---+-----+    +---+-----+
-
+/*
         if(num==0){  //G11 update
             int pivot = 0;
             for(int r=0;r<Round_0;++r){
-                phase_one<<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0]);
-                phase_two<<< p2b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], r);   //0~sp[0]
-                phase_three<<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], r); //0~sp[0]
-                pivot += block_size;
+                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0]);
+                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], r);   //0~sp[0]
+                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], r); //0~sp[0]
+                pivot += BLOCK_SIZE;
             }
         }else{  //G11 update
              int pivot = 0;
             for(int r=0;r<Round_0;++r){
-                phase_one<<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0]);
-                phase_two<<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], r);   //0~sp[0]
-                phase_three<<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], sp[0], r); //0~sp[0]
-                pivot += block_size;
+                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0]);
+                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], r);   //0~sp[0]
+                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], sp[0], r); //0~sp[0]
+                pivot += BLOCK_SIZE;
             }
         }
 
@@ -670,9 +671,9 @@ void block_FW(){
         if(num == 0){ //G11 -> G12
             int pivot = 0;
             for(int r=0;r<Round_0;++r){
-                phase_two_h<<< p2b_1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], sp[0], vert, sp[0]);
-                phase_three_h<<< p3b_g12, dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, sp[0], r);
-                pivot += block_size;
+                phase_two_h<BLOCK_SIZE><<< p2b_1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], sp[0], vert, sp[0]);
+                phase_three_h<BLOCK_SIZE><<< p3b_g12, dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, sp[0], r);
+                pivot += BLOCK_SIZE;
             }
 
             cudaMemcpy2DAsync(device_ptr[1], pitch_bytes[1],
@@ -683,9 +684,9 @@ void block_FW(){
         }else{  //G11 -> G21
             int pivot = 0;
             for(int r=0;r<Round_0;++r){
-                phase_two_v<<< p2b_1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, sp[0], sp[0]);
-                phase_three_v<<< p3b_g21 , dimt , 0 , stream[1]>>>(device_ptr[1], pitch[1], pivot, sp[0], 0, vert, sp[0], sp[0], r);
-                pivot += block_size;
+                phase_two_v<BLOCK_SIZE><<< p2b_1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, sp[0], sp[0]);
+                phase_three_v<BLOCK_SIZE><<< p3b_g21 , dimt , 0 , stream[1]>>>(device_ptr[1], pitch[1], pivot, sp[0], 0, vert, sp[0], sp[0], r);
+                pivot += BLOCK_SIZE;
             }
 
             cudaMemcpy2DAsync(device_ptr[0] + sp[0]*pitch[0], pitch_bytes[1],
@@ -702,16 +703,16 @@ void block_FW(){
 
             int pivot = 0;
             for(int r=0;r<Round_0;++r){
-                phase_three<<< p3b_g22 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, sp[0], vert);
-                pivot += block_size;
+                phase_three<BLOCK_SIZE><<< p3b_g22 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, sp[0], vert);
+                pivot += BLOCK_SIZE;
             }  
         }else{ //G22 relax
             cudaStreamWaitEvent(stream[1], sync_1[0], 0);
 
             int pivot = 0;
             for(int r=0;r<Round_0;++r){
-                phase_three<<< p3b_g22 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, sp[0], vert);
-                pivot += block_size;
+                phase_three<BLOCK_SIZE><<< p3b_g22 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, sp[0], vert);
+                pivot += BLOCK_SIZE;
             } 
         }
 
@@ -719,18 +720,18 @@ void block_FW(){
         if(num == 0){  //G22 update
             int pivot = sp[0];
             for(int r=0;r<Round_1;++r){
-                phase_one<<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, vert);
-                phase_two<<< p2b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, r);  //sp[0]~vert
-                phase_three<<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, vert, r);//sp[0]~vert
-                pivot += block_size;
+                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, vert);
+                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, r);  //sp[0]~vert
+                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, vert, r);//sp[0]~vert
+                pivot += BLOCK_SIZE;
             }
         }else{  //G22 update
             int pivot = sp[0];
             for(int r=0;r<Round_1;++r){
-                phase_one<<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, vert);
-                phase_two<<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, r);  //sp[0]~vert
-                phase_three<<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, vert, r);//sp[0]~vert
-                pivot += block_size;
+                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, vert);
+                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, r);  //sp[0]~vert
+                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, vert, r);//sp[0]~vert
+                pivot += BLOCK_SIZE;
             }
         }
 
@@ -739,17 +740,17 @@ void block_FW(){
 
             int pivot = sp[0];
             for(int r=0;r<Round_1;++r){
-                phase_two_v<<< p2b_0 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
-                phase_three_v<<< p3b_g12 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, vert, r);
-                pivot += block_size;
+                phase_two_v<BLOCK_SIZE><<< p2b_0 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
+                phase_three_v<BLOCK_SIZE><<< p3b_g12 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, vert, r);
+                pivot += BLOCK_SIZE;
             }
 
         }else{  //G22 -> G21
             int pivot = sp[0];
             for(int r=0;r<Round_1;++r){
-                phase_two_h<<< p2b_0 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, vert, sp[0], vert);
-                phase_three_h<<< p3b_g21, dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], 0, vert, sp[0], vert, r);
-                pivot += block_size;
+                phase_two_h<BLOCK_SIZE><<< p2b_0 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, vert, sp[0], vert);
+                phase_three_h<BLOCK_SIZE><<< p3b_g21, dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], 0, vert, sp[0], vert, r);
+                pivot += BLOCK_SIZE;
             }
 
             cudaMemcpy2DAsync(device_ptr[0] + sp[0]*pitch[0], pitch_bytes[0], 
@@ -768,15 +769,16 @@ void block_FW(){
 
             int pivot = sp[0];
             for(int r=0;r<Round_1;++r){
-                phase_three<<< p3b_g11 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
-                pivot += block_size;
+                phase_three<BLOCK_SIZE><<< p3b_g11 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
+                pivot += BLOCK_SIZE;
             }
 
             cudaMemcpy2DAsync(data, vert_bytes, 
                             device_ptr[0], pitch_bytes[0],
                             vert_bytes, sp[0],cudaMemcpyDeviceToHost, stream[0]); 
         }
-/*
+*/
+        
 #pragma omp barrier
 
 
@@ -925,20 +927,7 @@ void block_FW(){
         // *
 
 #pragma omp barrier
-        cudaDeviceSynchronize();
-#pragma omp single
-        {
-            cudaMemcpy2D(data, vert_bytes, device_ptr[0], pitch_bytes[0], vert_bytes, vert, cudaMemcpyDeviceToHost);
-            print_out("step 3: G11->G21");
-            cudaMemcpy2D(data, vert_bytes, device_ptr[1], pitch_bytes[1], vert_bytes, vert, cudaMemcpyDeviceToHost);
-            print_out("step 1: G22->G12");
-        }
 
-#pragma omp barrier
-
-
-
-        
         //   Step 4: G12, G21 both relax to G11 and G22
         // *
         // *    stream 0      stream 1
@@ -997,7 +986,7 @@ void block_FW(){
         // *       +--> |   |     |
         // *            +---+-----+
         // *
-*/
+
         cudaDeviceSynchronize();
 #pragma omp barrier
         cudaStreamDestroy(stream[num]);
@@ -1022,20 +1011,18 @@ int main(int argc, char **argv){
     
     block_size = std::atoi(argv[3]);
     switch(block_size){
-        //case 8:
-        //    block_FW<8>();
-        //    break;
-        //case 16:
-        //    block_FW<16>();
-        //    break;
-        //case 24:
-        //    block_FW<24>();
-        //    break;
-        //case 32:
-        //    block_FW<32>();
-        //    break;
+        case 8:
+            block_FW<8>();
+            break;
+        case 16:
+            block_FW<16>();
+            break;
+        case 24:
+            block_FW<24>();
+            break;
+        case 32:
         default:
-            block_FW();
+            block_FW<32>();
             break;
     }
 
