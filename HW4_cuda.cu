@@ -202,6 +202,11 @@ void dump_to_file(const char *file){
     fclose(fout);
 }
 
+#define tx threadIdx.x
+#define ty threadIdx.y
+#define bx blockIdx.x
+#define by blockIdx.y
+
 template<int block_size>
 __global__ void phase_one(int32_t* const dist, const int round, const int width, const int vert, const int br){
 
@@ -261,6 +266,73 @@ __global__ void phase_one(int32_t* const dist, const int round, const int width,
 
     if( s[threadIdx.y][threadIdx.x] < o)
         dist[cell] = s[threadIdx.y][threadIdx.x];
+}
+
+template<int block_size>
+__global__ void phase_two_h(int32_t* const dist, const int width, const int bound, const int pivot, const int skip){
+    if(bx == skip)return;
+
+    __shared__ int s_m[block_size][block_size];
+    __shared__ int s_c[block_size][block_size];
+
+    const int mc = pivot + ty;
+    const int mr = block_size * bx + tx;
+    const int cc = mc;
+    const int cr = pivot + tx;
+
+    const int m_cell = mc * width + mr;
+    const bool mb = (mc < bound && mr < bound);
+    const bool cb = (cc < bound && cr < bound);
+
+    s_m[ty][tx] = (mb) ? dist[m_cell] : INF;
+    s_c[ty][tx] = (cb) ? dist[cc * width + cr] : INF;
+
+    if( !mb ) return;
+
+    int o = s_m[ty][tx];
+    int n;
+    for(int k=0;k<block_size;++k){
+        __syncthreads();
+        n = s_c[ty][k] + s_m[k][tx];
+        if(n < s_m[ty][tx])
+            s_m[ty][tx] = n;
+    }
+    if(s_m[ty][tx] < o)
+        dist[m_cell] = s_m[ty][tx];
+}
+
+template<int block_size>
+__global__ void phase_two_sg(int32_t* const dist, const int width, const int bound, const int pivot, const int line){
+    
+    __shared__ int s_m[block_size][block_size];
+    __shared__ int s_c[block_size][block_size];
+
+    const int mc = line + ty;
+    const int mr = pivot + tx;
+    const int cc = pivot + ty;
+    const int cr = mr;
+
+    const int m_cell = mc * width + mr;
+
+    const bool mb = (mc < bound && mr < bound);
+    const bool cb = (cc < bound && cr < bound);
+
+    s_m[ty][tx] = (mb) ? dist[m_cell] : INF;
+    s_c[ty][tx] = (cb) ? dist[cc * width + cr] : INF;
+
+    if( !mb ) return;
+
+    int o = s_m[ty][tx];
+    int n;
+    for(int k=0;k<block_size;++k){
+        __syncthreads();
+        n = s_m[ty][k] + s_c[k][tx];
+        if(n < s_m[ty][tx])
+            s_m[ty][tx] = n;
+    }
+    if(s_m[ty][tx] < o)
+        dist[m_cell] = s_m[ty][tx];
+
 }
 
 template<int block_size>
@@ -386,6 +458,36 @@ __global__ void phase_two(int32_t* const dist, const int round, const int width,
 }
 
 
+template<int block_size>
+__global__ void phase_three_line(int32_t* const dist, const int width, const int bound, const int pivot, const int line, const int skip){
+    if(blockIdx.x == skip)return;
+
+    __shared__ int s_l[block_size][block_size];
+    __shared__ int s_r[block_size][block_size];
+
+    const int mc = line + ty;
+    const int mr = block_size * bx + tx;
+    const int lr = pivot + tx;
+    const int rc = pivot + ty;
+
+    s_l[ty][tx] = (mc < bound && lr < bound) ? dist[mc * width + lr] : INF;
+    s_r[ty][tx] = (rc < bound && mr < bound) ? dist[rc * width + mr] : INF;
+
+    if(mc >= bound || mr >= bound)return;
+
+    const int m_cell = mc * width + mr;
+    __syncthreads();
+
+    int o = dist[m_cell];
+    int mn = s_l[ty][0] + s_r[0][tx];
+    int n;
+    for(int k=1;k<block_size;++k){
+        n = s_l[ty][k] + s_r[k][tx];
+        if(n < mn)mn = n;
+    }
+    if(mn < o)
+        dist[m_cell] = mn;
+}
 
 template<int block_size>
 __global__ void phase_three(int32_t* const dist, const int round, const int width, const int vert, const int br){
@@ -408,15 +510,14 @@ __global__ void phase_three(int32_t* const dist, const int round, const int widt
     const int m_cell = mc * width + mr;
     __syncthreads();
 
+    
     int o = dist[m_cell];
-
+    int mn = s_l[ty][0] + s_r[0][tx];
     int n;
-    int mn=s_l[threadIdx.y][0] + s_r[0][threadIdx.x];
     for(int k=1;k<block_size;++k){
-        n = s_l[threadIdx.y][k] + s_r[k][threadIdx.x];
-        if(n < mn) mn = n;
+        n = s_l[ty][k] + s_r[k][tx];
+        if(n < mn)mn = n;
     }
-
     if(mn < o)
         dist[m_cell] = mn;
 }
@@ -454,6 +555,10 @@ __global__ void phase_three(int32_t* const dist, const int round, const int widt
         dist[m_cell] = mn;
 }
 
+#undef tx
+#undef ty
+#undef bx
+#undef by
 
 
 template<int BLOCK_SIZE> 
@@ -465,19 +570,62 @@ void block_FW(){
     size_t pitch_bytes;
 
     dim3 p2b(Round, 2, 1);
+    dim3 p2bh(Round, 1, 1);
     dim3 p3b(Round, Round, 1);
+    dim3 p3bl(Round, 1, 1);
 
     dim3 dimt(BLOCK_SIZE, BLOCK_SIZE, 1);
 
+    cudaStream_t *stream = new cudaStream_t[Round];
+    cudaEvent_t event;
+    cudaEventCreate(&event);
 
     cudaMallocPitch(&device_ptr, &pitch_bytes, vert_bytes, vert);
 
-    cudaMemcpy2D(device_ptr, pitch_bytes, data, vert_bytes,
-                    vert_bytes, vert, cudaMemcpyHostToDevice);
-
     int pitch = pitch_bytes / sizeof(int);
-    //cudaDeviceSynchronize();
 
+    int offset = 0;
+    for(int i=0;i<Round;++i){
+        cudaStreamCreate(&stream[i]);
+        cudaMemcpy2DAsync(device_ptr + offset*pitch, pitch_bytes,
+                    data + offset*vert, vert_bytes,
+                    vert_bytes, MIN(vert-offset, BLOCK_SIZE), cudaMemcpyHostToDevice, stream[i]);
+        offset += BLOCK_SIZE;
+        if(i == 0)
+            cudaEventRecord(event, stream[0]);
+    }
+
+    cudaStream_t main_stream;
+    cudaStreamCreate(&main_stream);
+    cudaEvent_t main_event_1;
+    cudaEvent_t main_event_2;
+    cudaEventCreate(&main_event_1);
+    cudaEventCreate(&main_event_2);
+
+    int pivot = 0;
+    for(int r=0;r<Round;++r){
+        cudaStreamWaitEvent(main_stream, event, 0);
+
+        phase_one< BLOCK_SIZE ><<< 1 , dimt , 0 , main_stream >>>(device_ptr, r, pitch, vert, pivot);
+        cudaEventRecord(main_event_1, main_stream);
+
+        phase_two_h< BLOCK_SIZE ><<< p2bh , dimt , 0 , main_stream >>>(device_ptr, pitch, vert, pivot, r);
+        cudaEventRecord(main_event_2, main_stream);
+
+        for(int l=0;l<Round;++l){
+            if(l==r){
+                cudaStreamWaitEvent(stream[l], main_event_2, 0);
+                continue;
+            }
+            cudaStreamWaitEvent(stream[l], main_event_1, 0);
+            phase_two_sg< BLOCK_SIZE ><<< 1, dimt, 0, stream[l] >>> (device_ptr, pitch, vert, pivot, l*BLOCK_SIZE) ;
+            cudaStreamWaitEvent(stream[l], main_event_2, 0);
+            phase_three_line< BLOCK_SIZE ><<< p3bl , dimt , 0 , stream[l] >>>(device_ptr, pitch, vert, pivot, l*BLOCK_SIZE, r);
+            if(l == r+1)cudaEventRecord(event, stream[l]);
+        }
+        pivot += BLOCK_SIZE;
+    }
+/*
     int br = 0;
     for(int r=0;r<Round;++r){
         phase_one< BLOCK_SIZE ><<< 1 , dimt >>>(device_ptr, r, pitch, vert, br);
@@ -485,11 +633,20 @@ void block_FW(){
         phase_three< BLOCK_SIZE ><<< p3b , dimt >>>(device_ptr, r, pitch, vert, br);
         br += BLOCK_SIZE;
     }
+*/
 
+    offset = 0;
+    for(int i=0;i<Round;++i){
+        cudaMemcpy2DAsync(data + offset*vert, vert_bytes,
+                        device_ptr + offset*pitch, pitch_bytes,
+                        vert_bytes, MIN(vert-offset, BLOCK_SIZE), cudaMemcpyDeviceToHost, stream[i]);
+        offset += BLOCK_SIZE;
+    }
     cudaDeviceSynchronize();
-    cudaMemcpy2D(data, vert_bytes, device_ptr, pitch_bytes, vert_bytes, vert, cudaMemcpyDeviceToHost);
+    //cudaMemcpy2D(data, vert_bytes, device_ptr, pitch_bytes, vert_bytes, vert, cudaMemcpyDeviceToHost);
 
     cudaFree(device_ptr);
+    delete[] stream;
 }
 
 void block_FW(){
@@ -505,10 +662,8 @@ void block_FW(){
     dim3 dimt(block_size, block_size, 1);
 
 
-
     cudaMallocPitch(&device_ptr, &pitch_bytes, vert_bytes, vert);
-
-    cudaMemcpy2DAsync(device_ptr, pitch_bytes, data, vert_bytes,
+    cudaMemcpy2D(device_ptr, pitch_bytes, data, vert_bytes,
                     vert_bytes, vert, cudaMemcpyHostToDevice);
 
     cudaDeviceSynchronize();
@@ -552,10 +707,8 @@ int main(int argc, char **argv){
             block_FW<24>();
             break;
         case 32:
-            block_FW<32>();
-            break;
         default:
-            block_FW();
+            block_FW<32>();
             break;
     }
 

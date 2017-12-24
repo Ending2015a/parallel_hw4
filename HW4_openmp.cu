@@ -523,44 +523,6 @@ __global__ void phase_three_v(int32_t* const dist, const int width, const int pi
 }
 
 
-
-/*
-template<int BLOCK_SIZE> 
-void block_FW(){
-    int Round = CEIL(vert, BLOCK_SIZE);
-    size_t vert_bytes = vert * sizeof(int);
-
-    int32_t *device_ptr;
-    size_t pitch_bytes;
-
-    dim3 p2b(Round, 2, 1);
-    dim3 p3b(Round, Round, 1);
-
-    dim3 dimt(BLOCK_SIZE, BLOCK_SIZE, 1);
-
-
-    cudaMallocPitch(&device_ptr, &pitch_bytes, vert_bytes, vert);
-
-    cudaMemcpy2D(device_ptr, pitch_bytes, data, vert_bytes,
-                    vert_bytes, vert, cudaMemcpyHostToDevice);
-
-    int pitch = pitch_bytes / sizeof(int);
-    //cudaDeviceSynchronize();
-
-    int br = 0;
-    for(int r=0;r<Round;++r){
-        phase_one< BLOCK_SIZE ><<< 1 , dimt >>>(device_ptr, r, pitch, vert, br);
-        phase_two< BLOCK_SIZE ><<< p2b , dimt >>>(device_ptr, r, pitch, vert, br);
-        phase_three< BLOCK_SIZE ><<< p3b , dimt >>>(device_ptr, r, pitch, vert, br);
-        br += BLOCK_SIZE;
-    }
-
-    cudaDeviceSynchronize();
-    cudaMemcpy2D(data, vert_bytes, device_ptr, pitch_bytes, vert_bytes, vert, cudaMemcpyDeviceToHost);
-
-    cudaFree(device_ptr);
-}*/
-
 template<int BLOCK_SIZE>
 void block_FW(){
     int sp[2];
@@ -650,7 +612,8 @@ void block_FW(){
         //  +---+-----+    +---+-----+
 
 
-        if(num==0){  //G11 update
+        if(num==0){
+            //G11 update
             int pivot = 0;
             for(int r=0;r<Round_0;++r){
                 phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0]);
@@ -658,19 +621,9 @@ void block_FW(){
                 phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], r); //0~sp[0]
                 pivot += BLOCK_SIZE;
             }
-        }else{  //G11 update
-             int pivot = 0;
-            for(int r=0;r<Round_0;++r){
-                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0]);
-                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], r);   //0~sp[0]
-                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], sp[0], r); //0~sp[0]
-                pivot += BLOCK_SIZE;
-            }
-        }
 
-        //G11 -> G12 G21
-        if(num == 0){ //G11 -> G12
-            int pivot = 0;
+            //G11->G12
+            pivot = 0;
             for(int r=0;r<Round_0;++r){
                 phase_two_h<BLOCK_SIZE><<< p2b_1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], sp[0], vert, sp[0]);
                 phase_three_h<BLOCK_SIZE><<< p3b_g12, dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, sp[0], r);
@@ -682,8 +635,59 @@ void block_FW(){
                             vert_bytes, sp[0], cudaMemcpyDeviceToDevice, stream[0]);
             cudaEventRecord(sync_1[0], stream[0]);
 
-        }else{  //G11 -> G21
-            int pivot = 0;
+
+            //wait
+            cudaStreamWaitEvent(stream[0], sync_1[1], 0);
+
+            //G12 G21 -> G22
+            pivot = 0;
+            for(int r=0;r<Round_0;++r){
+                phase_three<BLOCK_SIZE><<< p3b_g22 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, sp[0], vert);
+                pivot += BLOCK_SIZE;
+            } 
+
+            //G22 update
+            pivot = sp[0];
+            for(int r=0;r<Round_1;++r){
+                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, vert);
+                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, r);  //sp[0]~vert
+                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, vert, r);//sp[0]~vert
+                pivot += BLOCK_SIZE;
+            }
+
+            //G22 -> G12
+            pivot = sp[0];
+            for(int r=0;r<Round_1;++r){
+                phase_two_v<BLOCK_SIZE><<< p2b_0 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
+                phase_three_v<BLOCK_SIZE><<< p3b_g12 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, vert, r);
+                pivot += BLOCK_SIZE;
+            }
+
+            //wait
+            cudaStreamWaitEvent(stream[0], sync_2[1], 0);
+
+            //G12 G21 -> G11
+            pivot = sp[0];
+            for(int r=0;r<Round_1;++r){
+                phase_three<BLOCK_SIZE><<< p3b_g11 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
+                pivot += BLOCK_SIZE;
+            }
+
+            cudaMemcpy2DAsync(data, vert_bytes, 
+                            device_ptr[0], pitch_bytes[0],
+                            vert_bytes, sp[0],cudaMemcpyDeviceToHost, stream[0]); 
+
+        }else{  //G11 update
+             int pivot = 0;
+            for(int r=0;r<Round_0;++r){
+                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0]);
+                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], r);   //0~sp[0]
+                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], sp[0], r); //0~sp[0]
+                pivot += BLOCK_SIZE;
+            }
+
+            //G11->G21
+            pivot = 0;
             for(int r=0;r<Round_0;++r){
                 phase_two_v<BLOCK_SIZE><<< p2b_1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, sp[0], sp[0]);
                 phase_three_v<BLOCK_SIZE><<< p3b_g21 , dimt , 0 , stream[1]>>>(device_ptr[1], pitch[1], pivot, sp[0], 0, vert, sp[0], sp[0], r);
@@ -694,60 +698,28 @@ void block_FW(){
                             device_ptr[1] + sp[0]*pitch[1], pitch_bytes[0],
                             vert_bytes, sp[1], cudaMemcpyDeviceToDevice, stream[1]);
             cudaEventRecord(sync_1[1], stream[1]);
-        }
 
-//#pragma omp barrier
-
-        //relax G12 G21 -> G22
-        if(num == 0){  //G22 relax
-            cudaStreamWaitEvent(stream[0], sync_1[1], 0);
-
-            int pivot = 0;
-            for(int r=0;r<Round_0;++r){
-                phase_three<BLOCK_SIZE><<< p3b_g22 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, sp[0], vert);
-                pivot += BLOCK_SIZE;
-            }  
-        }else{ //G22 relax
+            //wait thread 1
             cudaStreamWaitEvent(stream[1], sync_1[0], 0);
 
-            int pivot = 0;
+            //G12 G21 -> G22
+            pivot = 0;
             for(int r=0;r<Round_0;++r){
                 phase_three<BLOCK_SIZE><<< p3b_g22 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, sp[0], vert);
                 pivot += BLOCK_SIZE;
-            } 
-        }
-
-        //G22 update
-        if(num == 0){  //G22 update
-            int pivot = sp[0];
-            for(int r=0;r<Round_1;++r){
-                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, vert);
-                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, r);  //sp[0]~vert
-                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, vert, r);//sp[0]~vert
-                pivot += BLOCK_SIZE;
             }
-        }else{  //G22 update
-            int pivot = sp[0];
+
+            //G22 update
+            pivot = sp[0];
             for(int r=0;r<Round_1;++r){
                 phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, vert);
                 phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, r);  //sp[0]~vert
                 phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, vert, r);//sp[0]~vert
                 pivot += BLOCK_SIZE;
             }
-        }
 
-        //G22 -> G12
-        if(num == 0){  //G22 -> G12
-
-            int pivot = sp[0];
-            for(int r=0;r<Round_1;++r){
-                phase_two_v<BLOCK_SIZE><<< p2b_0 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
-                phase_three_v<BLOCK_SIZE><<< p3b_g12 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, vert, r);
-                pivot += BLOCK_SIZE;
-            }
-
-        }else{  //G22 -> G21
-            int pivot = sp[0];
+            //G22 -> G21
+            pivot = sp[0];
             for(int r=0;r<Round_1;++r){
                 phase_two_h<BLOCK_SIZE><<< p2b_0 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, vert, sp[0], vert);
                 phase_three_h<BLOCK_SIZE><<< p3b_g21, dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], 0, vert, sp[0], vert, r);
@@ -762,44 +734,9 @@ void block_FW(){
             cudaMemcpy2DAsync(data + sp[0]*vert, vert_bytes,
                             device_ptr[1] + sp[0]*pitch[1], pitch_bytes[1],
                             vert_bytes, sp[1], cudaMemcpyDeviceToHost, stream[1]); 
+
         }
 
-//#pragma omp barrier
-        if(num==0){  //G11 relax
-            cudaStreamWaitEvent(stream[0], sync_2[1], 0);
-
-            int pivot = sp[0];
-            for(int r=0;r<Round_1;++r){
-                phase_three<BLOCK_SIZE><<< p3b_g11 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], vert, vert);
-                pivot += BLOCK_SIZE;
-            }
-
-            cudaMemcpy2DAsync(data, vert_bytes, 
-                            device_ptr[0], pitch_bytes[0],
-                            vert_bytes, sp[0],cudaMemcpyDeviceToHost, stream[0]); 
-        }
-
-        
-/*
-        if(num){ //G22
-            int pivot = sp[0];
-            for(int r=0;r<Round;++r){
-                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, vert);
-                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, r);  //sp[0]~vert
-                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], vert, vert, r);//sp[0]~vert
-                pivot += BLOCK_SIZE;
-            }
-        }else{ //G11
-            int pivot = 0;
-            for(int r=0;r<Round;++r){
-                phase_one<BLOCK_SIZE><<< 1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0]);
-                phase_two<BLOCK_SIZE><<< p2b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], r);   //0~sp[0]
-                phase_three<BLOCK_SIZE><<< p3b , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], r); //0~sp[0]
-                pivot += BLOCK_SIZE;
-            }
-        }
-
-#pragma omp barrier
         // *   Step 2: G11->G12, G22->G21
         // *
         // *    stream 0      stream 1
@@ -811,31 +748,6 @@ void block_FW(){
         // *  |   |     |    | U |  N  |
         // *  +---+-----+    +---+-----+
         // *
-
-        if(num){  //G22 relax to G21
-            int pivot = sp[0];
-            for(int r=0;r<Round;++r){
-                phase_two_h<BLOCK_SIZE><<< p2b_0 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, vert, sp[0], vert);
-                phase_three_h<BLOCK_SIZE><<< p3b_g21, dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, sp[0], 0, vert, sp[0], vert, r);
-                pivot += BLOCK_SIZE;
-            }
-
-            cudaMemcpy2DAsync(device_ptr[0] + sp[0]*pitch[0], pitch_bytes[0], 
-                            device_ptr[1] + sp[0]*pitch[1], pitch_bytes[1],
-                            vert_bytes, sp[1], cudaMemcpyDeviceToDevice, stream[1]);
-            cudaEventRecord(sync_1[1], stream[1]);
-        }else{  //G11 relax to G12
-            int pivot = 0;
-            for(int r=0;r<Round;++r){
-                phase_two_h<BLOCK_SIZE><<< p2b_1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], sp[0], vert, sp[0]);
-                phase_three_h<BLOCK_SIZE><<< p3b_g12, dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, 0, sp[0], sp[0], vert, sp[0], r);
-                pivot += BLOCK_SIZE;
-            }
-            cudaMemcpy2DAsync(device_ptr[1], pitch_bytes[1],
-                            device_ptr[0], pitch_bytes[0],
-                            vert_bytes, sp[0], cudaMemcpyDeviceToDevice, stream[0]);
-            cudaEventRecord(sync_1[0], stream[0]);
-        }
 
         //         Synchronize
         // *
@@ -849,8 +761,6 @@ void block_FW(){
         // *  +---+-----+    +---+-----+
         // *
 
-#pragma omp barrier
-
         //   Step 3: G11->G21, G22->G12
         // *
         // *    stream 0      stream 1
@@ -862,36 +772,6 @@ void block_FW(){
         // *  | U |     |    |   |  P  |
         // *  +---+-----+    +---+-----+
         // *
-
-        if(num){
-            cudaStreamWaitEvent(stream[1], sync_1[0], 0);
-
-            int pivot = sp[0];
-            for(int r=0;r<Round;++r){
-                phase_two_v<BLOCK_SIZE><<< p2b_0 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], vert, vert);
-                phase_three_v<BLOCK_SIZE><<< p3b_g12 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], sp[0], vert, vert, r);
-                pivot += BLOCK_SIZE;
-            }
-
-            cudaMemcpy2DAsync(device_ptr[0], pitch_bytes[0],
-                            device_ptr[1], pitch_bytes[1],
-                            vert_bytes, sp[0], cudaMemcpyDeviceToDevice, stream[1]);
-            cudaEventRecord(sync_2[1], stream[1]);
-        }else{
-            cudaStreamWaitEvent(stream[0], sync_1[1], 0);
-
-            int pivot = 0;
-            for(int r=0;r<Round;++r){
-                phase_two_v<BLOCK_SIZE><<< p2b_1 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, sp[0], sp[0]);
-                phase_three_v<BLOCK_SIZE><<< p3b_g21 , dimt , 0 , stream[0]>>>(device_ptr[0], pitch[0], pivot, sp[0], 0, vert, sp[0], sp[0], r);
-                pivot += BLOCK_SIZE;
-            }
-
-            cudaMemcpy2DAsync(device_ptr[1] + sp[0]*pitch[1], pitch_bytes[1],
-                            device_ptr[0] + sp[0]*pitch[0], pitch_bytes[0],
-                            vert_bytes, sp[1], cudaMemcpyDeviceToDevice, stream[0]);
-            cudaEventRecord(sync_2[0], stream[0]);
-        }
 
         //         Synchronize
         // *
@@ -905,8 +785,6 @@ void block_FW(){
         // *  +---+-----+    +---+-----+
         // *
 
-#pragma omp barrier
-
         //   Step 4: G12, G21 both relax to G11 and G22
         // *
         // *    stream 0      stream 1
@@ -918,32 +796,6 @@ void block_FW(){
         // *  |   |  U  |    |   |  P  |
         // *  +---+-----+    +---+-----+
         // *
-
-        if(num){
-            cudaStreamWaitEvent(stream[1], sync_2[0], 0);
-
-            int pivot = sp[0];
-            for(int r=0;r<Round;++r){
-                phase_three<BLOCK_SIZE><<< p3b_g11 , dimt , 0 , stream[1] >>>(device_ptr[1], pitch[1], pivot, 0, sp[0], vert, vert);
-                pivot += BLOCK_SIZE;
-            }
-
-            cudaMemcpy2DAsync(data, vert_bytes, 
-                            device_ptr[1], pitch_bytes[1],
-                            vert_bytes, sp[0],cudaMemcpyDeviceToHost, stream[1]); //to host
-        }else{
-            cudaStreamWaitEvent(stream[0], sync_2[1], 0);
-
-            int pivot = 0;
-            for(int r=0;r<Round;++r){
-                phase_three<BLOCK_SIZE><<< p3b_g22 , dimt , 0 , stream[0] >>>(device_ptr[0], pitch[0], pivot, sp[0], vert, sp[0], vert);
-                pivot += BLOCK_SIZE;
-            }
-            cudaMemcpy2DAsync(data + sp[0]*vert, vert_bytes,
-                            device_ptr[0] + sp[0]*pitch[0], pitch_bytes[0],
-                            vert_bytes, sp[1], cudaMemcpyDeviceToHost, stream[0]); //to host
-        }
-
 
         //            Synchronize
         // *
@@ -965,8 +817,6 @@ void block_FW(){
         // *       +--> |   |     |
         // *            +---+-----+
         // *
-*/
-
         cudaDeviceSynchronize();
 #pragma omp barrier
         cudaStreamDestroy(stream[num]);
